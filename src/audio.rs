@@ -49,7 +49,7 @@ impl Audio {
         for volume in sessions {
             let previous = unsafe { volume.GetMasterVolume() }.map_err(|e| e.to_string())?;
             pending.push(ChangedSession {
-                applied: settings.lowered_volume(previous),
+                applied: settings.target_volume(),
                 previous,
                 control: volume.cast().map_err(|e| e.to_string())?,
                 volume,
@@ -70,7 +70,48 @@ impl Audio {
             self.changed.push(session);
         }
         Ok(format!(
-            "Earplugs ON: {} game session(s), at most {}%. F2 restores.",
+            "Earplugs ON: {} game session(s), {}%. F2 restores.",
+            self.changed.len(),
+            settings.percent
+        ))
+    }
+
+    pub fn reapply(&mut self, settings: &Settings) -> Result<String, String> {
+        let target = settings.target_volume();
+        let mut before = Vec::with_capacity(self.changed.len());
+        // Read all current values before writing, and keep the original restore values.
+        for session in &self.changed {
+            before.push((unsafe { session.volume.GetMasterVolume() }.map_err(|e| format!("Cannot update game volume: {e}. Press F2 to restore or clear the old sessions."))?, session.applied));
+        }
+        for index in 0..self.changed.len() {
+            if let Err(error) = unsafe {
+                self.changed[index]
+                    .volume
+                    .SetMasterVolume(target, std::ptr::null())
+            } {
+                let mut rollback_failed = false;
+                for (session, &(current, applied)) in self.changed[..index].iter_mut().zip(&before)
+                {
+                    if unsafe { session.volume.SetMasterVolume(current, std::ptr::null()) }.is_ok()
+                    {
+                        session.applied = applied;
+                    } else {
+                        rollback_failed = true;
+                    }
+                }
+                return Err(format!(
+                    "Cannot update game volume: {error}. {}",
+                    if rollback_failed {
+                        "Rollback was incomplete; press F2 to restore before exiting."
+                    } else {
+                        "Previous mixer levels preserved."
+                    }
+                ));
+            }
+            self.changed[index].applied = target;
+        }
+        Ok(format!(
+            "Earplugs ON: {} game session(s), {}%. F2 restores the original volume.",
             self.changed.len(),
             settings.percent
         ))
@@ -219,6 +260,15 @@ mod tests {
             audio.toggle(&settings).unwrap();
             assert!(audio.is_lowered());
             assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.4));
+            for (percent, expected) in [("60", 0.6), ("80", 0.8), ("0", 0.0), ("100", 1.0)] {
+                audio
+                    .reapply(&Settings::parse(percent, "wardogs-test-tone.exe").unwrap())
+                    .unwrap();
+                assert!(unchanged(
+                    unsafe { volume.GetMasterVolume().unwrap() },
+                    expected
+                ));
+            }
             audio.toggle(&settings).unwrap();
             assert!(!audio.is_lowered());
             assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.8));
@@ -235,8 +285,9 @@ mod tests {
                 volume.SetMasterVolume(0.2, std::ptr::null()).unwrap();
             }
             audio.toggle(&settings).unwrap();
-            assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.2));
+            assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.4));
             audio.restore().unwrap();
+            assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.2));
             let mute = Settings::parse("0", "wardogs-test-tone.exe").unwrap();
             audio.toggle(&mute).unwrap();
             assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.0));
@@ -305,6 +356,43 @@ mod tests {
                 !unsafe { IsWindowVisible(window) }.as_bool(),
                 "Release must run in the background with F2 registered"
             );
+            use windows::Win32::{
+                Foundation::RECT,
+                UI::WindowsAndMessaging::{
+                    GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect,
+                    GetWindowThreadProcessId, SendMessageW, GWL_EXSTYLE, GW_OWNER, HTTRANSPARENT,
+                    MA_NOACTIVATE, WM_MOUSEACTIVATE, WM_NCHITTEST, WS_EX_TOPMOST,
+                },
+            };
+            let overlay = unsafe { FindWindowW(w!("WarDogsEarplugsOverlay"), None) }
+                .expect("Independent overlay window missing");
+            assert!(
+                !unsafe { IsWindowVisible(overlay) }.as_bool(),
+                "Overlay must start hidden while earplugs are OFF"
+            );
+            assert!(
+                unsafe { GetWindow(overlay, GW_OWNER) }.is_err(),
+                "Overlay must not be owned by a game or settings window"
+            );
+            let mut overlay_pid = 0;
+            unsafe {
+                GetWindowThreadProcessId(overlay, Some(&mut overlay_pid));
+            }
+            assert_eq!(
+                overlay_pid,
+                app.id(),
+                "Overlay must belong only to Earplugs"
+            );
+            assert_eq!(
+                unsafe { SendMessageW(overlay, WM_NCHITTEST, None, None) }.0,
+                HTTRANSPARENT as isize,
+                "Overlay must pass hit testing through"
+            );
+            assert_eq!(
+                unsafe { SendMessageW(overlay, WM_MOUSEACTIVATE, None, None) }.0,
+                MA_NOACTIVATE as isize,
+                "Overlay must not activate on mouse input"
+            );
             unsafe {
                 volume.SetMasterVolume(0.8, std::ptr::null()).unwrap();
             }
@@ -328,6 +416,7 @@ mod tests {
                 },
             };
             for expected in [0.4, 0.8, 0.4] {
+                let foreground = unsafe { GetForegroundWindow() };
                 assert_eq!(
                     unsafe { SendInput(&[key_down, key_up], size_of::<INPUT>() as i32) },
                     2,
@@ -343,13 +432,104 @@ mod tests {
                 });
                 assert!(
                     changed,
-                    "Real F2 did not set expected mixer volume {expected}"
+                    "Real F2 did not set expected mixer volume {expected}; actual={}, overlay_on={}, foreground={:?}",
+                    unsafe { volume.GetMasterVolume().unwrap() },
+                    unsafe { IsWindowVisible(overlay) }.as_bool(),
+                    unsafe { GetForegroundWindow() },
                 );
                 assert!(
                     !unsafe { IsWindowVisible(window) }.as_bool(),
                     "Hotkey unexpectedly opened the UI"
                 );
+                assert_eq!(
+                    unsafe { GetForegroundWindow() },
+                    foreground,
+                    "The overlay stole focus"
+                );
+                assert_eq!(
+                    unsafe { IsWindowVisible(overlay) }.as_bool(),
+                    expected == 0.4,
+                    "Overlay visibility must follow F2 state"
+                );
+                if expected == 0.4 {
+                    let mut bounds = RECT::default();
+                    unsafe {
+                        GetWindowRect(overlay, &mut bounds).unwrap();
+                    }
+                    assert_eq!(
+                        (bounds.left, bounds.top),
+                        (12, 12),
+                        "Overlay must sit at the primary screen's top-left"
+                    );
+                    assert!(
+                        unsafe { GetWindowLongPtrW(overlay, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0
+                            != 0,
+                        "Overlay must stay above normal windows"
+                    );
+                }
+                if expected == 0.4 {
+                    use windows::{
+                        core::PCWSTR,
+                        Win32::UI::WindowsAndMessaging::{GetDlgItem, SendMessageW, WM_SETTEXT},
+                    };
+                    let percent = unsafe { GetDlgItem(Some(window), 201) }.unwrap();
+                    for (text, target) in [
+                        ("60", 0.6),
+                        ("80", 0.8),
+                        ("10", 0.1),
+                        ("0", 0.0),
+                        ("100", 1.0),
+                        ("101", 1.0),
+                        ("40", 0.4),
+                    ] {
+                        let value: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+                        unsafe {
+                            SendMessageW(
+                                percent,
+                                WM_SETTEXT,
+                                None,
+                                Some(LPARAM(PCWSTR(value.as_ptr()).0 as isize)),
+                            );
+                            SendMessageW(window, WM_COMMAND, Some(WPARAM(101)), None);
+                        }
+                        assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, target), "Applying {text}% while ON did not change the actual Windows mixer volume");
+                        assert!(
+                            unsafe { IsWindowVisible(overlay) }.as_bool(),
+                            "Applying a percentage should keep the overlay ON"
+                        );
+                    }
+                }
                 std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            // Reproduce a persisted 40% mixer session: a new 60% target must be exact.
+            unsafe {
+                SendMessageW(window, WM_COMMAND, Some(WPARAM(102)), None);
+            }
+            assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.8));
+            unsafe {
+                volume.SetMasterVolume(0.4, std::ptr::null()).unwrap();
+            }
+            let percent =
+                unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(window), 201) }
+                    .unwrap();
+            unsafe {
+                SendMessageW(
+                    percent,
+                    windows::Win32::UI::WindowsAndMessaging::WM_SETTEXT,
+                    None,
+                    Some(LPARAM(w!("60").0 as isize)),
+                );
+                SendMessageW(window, WM_COMMAND, Some(WPARAM(101)), None);
+                SendMessageW(window, WM_COMMAND, Some(WPARAM(102)), None);
+            }
+            assert!(
+                unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.6),
+                "New 60% target was incorrectly capped by the old 40% mixer level"
+            );
+            assert!(unsafe { IsWindowVisible(overlay) }.as_bool());
+            if let Ok(seconds) = std::env::var("EARPLUGS_TEST_OVERLAY_PAUSE") {
+                println!("Release overlay is ON for visual/performance inspection.");
+                std::thread::sleep(std::time::Duration::from_secs(seconds.parse().unwrap()));
             }
             unsafe {
                 PostMessageW(Some(window), WM_COMMAND, WPARAM(104), LPARAM(0)).unwrap();
@@ -364,8 +544,12 @@ mod tests {
             });
             assert!(exited, "Restore-and-exit did not close release EXE");
             assert!(
-                unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.8),
+                unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.4),
                 "Exit did not restore previous mixer volume"
+            );
+            assert!(
+                unsafe { FindWindowW(w!("WarDogsEarplugsOverlay"), None) }.is_err(),
+                "Overlay remained after Exit"
             );
         }));
         let _ = app.kill();

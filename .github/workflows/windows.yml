@@ -88,11 +88,11 @@ jobs:
           if ($trusted) {
             ./scripts/package.ps1 -Executable signed/wardogs-earplugs.exe -Tag $env:RELEASE_TAG -RequireSignature
             $title = "WarDogs Earplugs $env:RELEASE_TAG"
-            $notes = "Tiny portable Windows x64 app. F2 toggles only the game's mixer volume to at most the entered percentage (default 40%) and restores it. Native Rust/Win32 UI, system tray, no polling or game process access. This executable has a valid Authenticode signature. New-publisher reputation warnings may still occur."
+            $notes = "Tiny portable Windows x64 app. F2 sets only the game's mixer volume to the exact entered percentage (default 40%) and restores it. Apply updates the active volume immediately. An independent top-left Windows badge displays Earplugs ON without game-window attachment or focus activation. Native Rust/Win32 UI and tray, no polling or game process access. This executable has a valid Authenticode signature. New-publisher reputation warnings may still occur."
           } else {
             ./scripts/package.ps1 -Executable unsigned/wardogs-earplugs.exe -Tag $env:RELEASE_TAG
             $title = "WarDogs Earplugs $env:RELEASE_TAG — unsigned draft, signing pending"
-            $notes = "Build is verified by CI but UNSIGNED. Trusted code signing is pending enrollment and identity validation. This draft is for maintainer review; public friend distribution awaits signing. See SIGNING.md in the repository. F2 toggles only matching WarDogs Windows mixer sessions to at most 40% by default, then restores them. Numeric setting, tray background operation, no polling or game process handles."
+            $notes = "Build is verified by CI but UNSIGNED. Trusted code signing is pending enrollment and identity validation. This draft is for maintainer review; the maintainer can explicitly publish it unsigned. See SIGNING.md in the repository. F2 sets matching WarDogs Windows mixer sessions to the exact entered percentage (40% by default), then restores them. Apply updates the active volume immediately. The independent top-left desktop badge displays Earplugs ON. Numeric setting and tray background operation, no polling, game process handles or game-window attachment."
           }
           $notes | Set-Content -LiteralPath release-notes.txt -Encoding utf8
           gh release view $env:RELEASE_TAG *> $null

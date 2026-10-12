@@ -1,6 +1,6 @@
 # Trusted Windows code signing
 
-Current status: **pending enrollment**. No trusted certificate or signing account was available when this project was created. Nothing is self-signed, and no unsupported trust claims are made. Version 0.1.0 is publicly available as an explicitly unsigned release. Trusted signing is required before the default automated workflow publishes future releases; the maintainer can explicitly publish an unsigned build.
+Current status: **pending enrollment**. No trusted certificate or signing account was available when this project was created. Nothing is self-signed, and no unsupported trust claims are made. Version 0.1.0 is publicly available as an explicitly unsigned release; v0.1.1 is prepared for explicitly unsigned public distribution at the maintainer's request. Trusted signing is required before the default automated workflow publishes releases; the maintainer can explicitly publish an unsigned build.
 
 ## Free open-source route: SignPath Foundation
 
@@ -11,7 +11,7 @@ After acceptance:
 1. Connect the GitHub repository to SignPath, install its required GitHub integration, and configure the project/trusted build policy for the GitHub-hosted workflow.
 2. Create an artifact configuration selecting the EXE inside the uploaded `windows-unsigned` artifact, and a **production** signing policy. Declare the actual authors, reviewers and signing approvers in the README.
 3. Set repository secret `SIGNPATH_API_TOKEN` and repository variables `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_SIGNING_POLICY_SLUG`, `SIGNPATH_ARTIFACT_CONFIGURATION_SLUG`.
-4. Run **Windows build and release** manually for tag `v0.1.0`. Approve its signing request in SignPath. The action waits up to one hour, downloads the signed EXE, validates Authenticode, and publishes/replaces the draft release.
+4. Run **Windows build and release** manually for the desired tag (for example, `v0.1.1`). Approve its signing request in SignPath. The action waits up to one hour, downloads the signed EXE, validates Authenticode, and publishes/replaces the draft release.
 
 The action uses uploaded GitHub artifact IDs and GitHub-hosted builds for provenance. See [SignPath's GitHub integration](https://docs.signpath.io/trusted-build-systems/github). Do not enable a test/self-signed policy for public releases: Windows signature verification must report `Valid`.
 

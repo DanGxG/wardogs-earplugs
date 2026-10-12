@@ -43,6 +43,9 @@ try {
     }
     Assert-True ($window -ne [IntPtr]::Zero) 'App did not create its window.'
     Assert-True (-not [EarplugsSmoke]::IsWindowVisible($window)) '--background did not start hidden (F2 conflict or tray failure).'
+    $overlay = [EarplugsSmoke]::FindWindow('WarDogsEarplugsOverlay', 'Earplugs ON')
+    Assert-True ($overlay -ne [IntPtr]::Zero) 'Independent overlay window did not initialize.'
+    Assert-True (-not [EarplugsSmoke]::IsWindowVisible($overlay)) 'Overlay was visible while OFF.'
     $percent = [EarplugsSmoke]::GetDlgItem($window, 201)
     $name = [EarplugsSmoke]::GetDlgItem($window, 202)
     Assert-True ([EarplugsSmoke]::Text($percent) -eq '40') 'Default percent was not 40.'
@@ -58,6 +61,7 @@ try {
     Assert-True ((Get-Content -LiteralPath $config -Raw).Contains("25`nno-such-game-fixture.exe")) 'Settings did not persist.'
     [void][EarplugsSmoke]::SendMessage($window, 0x312, [IntPtr]1, [IntPtr]::Zero)
     Assert-True ([EarplugsSmoke]::ChildTexts($window).Contains('No matching game audio.')) 'Hotkey dispatch did not report the missing game.'
+    Assert-True (-not [EarplugsSmoke]::IsWindowVisible($overlay)) 'Missing game incorrectly showed the ON overlay.'
     [void][EarplugsSmoke]::SendMessage($window, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)
     Assert-True (-not [EarplugsSmoke]::IsWindowVisible($window)) 'Close did not hide to the tray.'
     $second = Start-Process -FilePath (Resolve-Path -LiteralPath $Executable).Path -PassThru -WindowStyle Hidden
@@ -84,6 +88,7 @@ try {
     } | ConvertTo-Json | Tee-Object -FilePath 'test-output/smoke-results.json'
     [void][EarplugsSmoke]::PostMessage($window, 0x111, [IntPtr]104, [IntPtr]::Zero)
     Assert-True ($process.WaitForExit(5000)) 'Exit did not stop the app.'
+    Assert-True ([EarplugsSmoke]::FindWindow('WarDogsEarplugsOverlay', 'Earplugs ON') -eq [IntPtr]::Zero) 'Overlay survived Exit.'
 } finally {
     $env:LOCALAPPDATA = $previousLocalAppData
     if ($process -and -not $process.HasExited) {

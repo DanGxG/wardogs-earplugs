@@ -1,4 +1,4 @@
-use crate::{audio::Audio, model::Settings, settings};
+use crate::{audio::Audio, model::Settings, overlay::Overlay, settings};
 use std::{cell::RefCell, path::PathBuf};
 use windows::{
     core::{w, PCWSTR},
@@ -44,6 +44,7 @@ struct App {
     settings: Settings,
     settings_path: PathBuf,
     audio: Audio,
+    overlay: Overlay,
     tray: NOTIFYICONDATAW,
     tray_ready: bool,
     hotkey_ready: bool,
@@ -103,7 +104,7 @@ pub fn run() -> Result<(), String> {
         let (settings, initial_status) = match settings::load(&settings_path) {
             Ok(settings) => (
                 settings,
-                "F2 toggles game volume. Closing this window keeps it running.".to_string(),
+                "F2 toggles game volume. Apply updates it immediately while ON.".to_string(),
             ),
             Err(error) => (
                 Settings::default(),
@@ -123,6 +124,7 @@ pub fn run() -> Result<(), String> {
         if RegisterClassW(&class) == 0 {
             return Err(windows::core::Error::from_win32().to_string());
         }
+        let overlay = Overlay::new(instance)?;
         let window = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             CLASS,
@@ -146,6 +148,7 @@ pub fn run() -> Result<(), String> {
             settings,
             settings_path,
             audio: Audio::default(),
+            overlay,
             tray: NOTIFYICONDATAW::default(),
             tray_ready: false,
             hotkey_ready: false,
@@ -270,7 +273,7 @@ impl App {
         self.control(
             instance,
             "BUTTON",
-            "Save",
+            "Apply",
             20,
             166,
             80,
@@ -383,15 +386,31 @@ impl App {
         String::from_utf16_lossy(&buffer[..length as usize])
     }
 
-    unsafe fn save(&mut self, force: bool) -> Result<(), String> {
+    unsafe fn save(&mut self, force: bool) -> Result<String, String> {
         let new_settings = Settings::parse(&self.input(self.percent), &self.input(self.executable))
             .map_err(str::to_string)?;
         if force || new_settings != self.settings {
             settings::save(&self.settings_path, &new_settings)
                 .map_err(|e| format!("Could not save settings: {e}"))?;
         }
-        self.settings = new_settings;
-        Ok(())
+        let result = if self.audio.is_lowered() {
+            if new_settings.executable != self.settings.executable {
+                self.audio
+                    .restore()
+                    .and_then(|_| self.audio.toggle(&new_settings))
+            } else if force || new_settings.percent != self.settings.percent {
+                self.audio.reapply(&new_settings)
+            } else {
+                Ok("Settings saved.".into())
+            }
+        } else {
+            Ok("Settings saved. F2 activates earplugs at this percentage.".into())
+        };
+        if result.is_ok() {
+            self.settings = new_settings;
+        }
+        self.overlay.set_on(self.audio.is_lowered());
+        result
     }
 
     unsafe fn toggle(&mut self) {
@@ -401,6 +420,7 @@ impl App {
             self.save(false)
                 .and_then(|_| self.audio.toggle(&self.settings))
         };
+        self.overlay.set_on(self.audio.is_lowered());
         match result {
             Ok(status) => self.set_status(&status),
             Err(error) => {
@@ -419,7 +439,9 @@ impl App {
     }
 
     unsafe fn exit(&mut self) {
-        if let Err(error) = self.audio.restore() {
+        let result = self.audio.restore();
+        self.overlay.set_on(self.audio.is_lowered());
+        if let Err(error) = result {
             self.set_status(&error);
             show_window(self.window);
             return;
@@ -484,9 +506,7 @@ unsafe extern "system" fn window_proc(
                 WM_COMMAND if (wparam.0 >> 16) == BN_CLICKED as usize => {
                     match wparam.0 & 0xffff {
                         ID_SAVE => match app.save(true) {
-                            Ok(()) => {
-                                app.set_status("Settings saved. F2 uses them on the next lowering.")
-                            }
+                            Ok(status) => app.set_status(&status),
                             Err(error) => app.set_status(&error),
                         },
                         ID_TOGGLE => app.toggle(),
@@ -505,6 +525,7 @@ unsafe extern "system" fn window_proc(
                 }
                 WM_ENDSESSION if wparam.0 != 0 => {
                     let _ = app.audio.restore();
+                    app.overlay.set_on(false);
                     PostQuitMessage(0);
                     return LRESULT(0);
                 }

@@ -67,8 +67,8 @@ impl Settings {
         }
     }
 
-    pub fn lowered_volume(&self, current: f32) -> f32 {
-        current.min(f32::from(self.percent) / 100.0)
+    pub fn target_volume(&self) -> f32 {
+        f32::from(self.percent) / 100.0
     }
 }
 
@@ -109,10 +109,15 @@ mod tests {
         assert!(!exact.matches("other-wardogs.exe"));
     }
     #[test]
-    fn never_raises_volume_when_lowering_and_respects_manual_changes() {
+    fn exact_percentage_targets_and_manual_change_detection() {
         let settings = Settings::default();
-        assert!(unchanged(settings.lowered_volume(0.8), 0.4));
-        assert!(unchanged(settings.lowered_volume(0.2), 0.2));
+        assert!(unchanged(settings.target_volume(), 0.4));
+        for (percent, target) in [("0", 0.0), ("60", 0.6), ("80", 0.8), ("100", 1.0)] {
+            assert!(unchanged(
+                Settings::parse(percent, "wardogs").unwrap().target_volume(),
+                target
+            ));
+        }
         assert!(!unchanged(0.25, 0.4));
         assert!(unchanged(0.400001, 0.4));
     }

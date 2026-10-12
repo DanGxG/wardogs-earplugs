@@ -2,6 +2,7 @@
 
 mod audio;
 mod model;
+mod overlay;
 mod settings;
 mod ui;
 

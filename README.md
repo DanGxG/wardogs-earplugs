@@ -39,7 +39,7 @@ To uninstall, Exit, delete the EXE and remove any startup shortcut you created. 
 
 ## Code signing policy
 
-**Trusted code signing is pending service enrollment/identity validation.** An unsigned build is explicitly labeled unsigned and is kept in a draft release until trusted signing is available. Do not treat a checksum or a self-signed certificate as a trusted Authenticode signature.
+**Trusted code signing is pending service enrollment/identity validation.** Version 0.1.0 is publicly available as an explicitly unsigned EXE. The automated workflow keeps future unsigned builds in drafts unless the maintainer chooses to publish them. Do not treat a checksum or a self-signed certificate as a trusted Authenticode signature.
 
 The project includes a GitHub-hosted build and a SignPath signing stage. It publishes a signed release only after the returned EXE passes Windows Authenticode validation. See [SIGNING.md](SIGNING.md) for setup and certificate alternatives. The maintainer is [Daniel Grao / DanGxG](https://github.com/DanGxG). No signing provider is claimed to endorse or sign this project before acceptance.
 

@@ -30,6 +30,6 @@ The final tagged build repeats CI validation; the release signing stage refuses 
 ## Not verified / external prerequisites
 
 - Real WarDogs executable name, game-specific audio routing, exclusive fullscreen hotkey delivery and vendor anti-cheat acceptance: not tested with the actual game. The default `wardogs` filename filter is editable.
-- Trusted Authenticode signing: pending an approved provider/account and identity validation. Current binaries are unsigned and the release stays a draft.
+- Trusted Authenticode signing: pending an approved provider/account and identity validation. Version 0.1.0 was explicitly published as an unsigned release by maintainer request; it has no trusted Authenticode signature.
 - Zero SmartScreen/antivirus warnings on friends' PCs: cannot be guaranteed by signing or by the local scan.
 - Hard crashes/power failures cannot guarantee volume restoration. Settings replacement is atomic under normal same-volume filesystem operation; Windows audio sessions are not an ACID database.

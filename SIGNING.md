@@ -1,6 +1,6 @@
 # Trusted Windows code signing
 
-Current status: **pending enrollment**. No trusted certificate or signing account was available when this project was created. Nothing is self-signed, and no unsupported trust claims are made. GitHub's draft release contains explicitly unsigned builds for review; trusted signing is required before the default workflow publishes a release.
+Current status: **pending enrollment**. No trusted certificate or signing account was available when this project was created. Nothing is self-signed, and no unsupported trust claims are made. Version 0.1.0 is publicly available as an explicitly unsigned release. Trusted signing is required before the default automated workflow publishes future releases; the maintainer can explicitly publish an unsigned build.
 
 ## Free open-source route: SignPath Foundation
 

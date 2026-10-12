@@ -67,8 +67,8 @@ impl Settings {
         }
     }
 
-    pub fn target_volume(&self) -> f32 {
-        f32::from(self.percent) / 100.0
+    pub fn target_volume(&self, original: f32) -> f32 {
+        original * (f32::from(self.percent) / 100.0)
     }
 }
 
@@ -188,14 +188,14 @@ mod tests {
         assert!(!exact.matches("other-wardogs.exe"));
     }
     #[test]
-    fn exact_percentage_targets_and_manual_change_detection() {
+    fn relative_percentage_targets_and_manual_change_detection() {
         let settings = Settings::default();
-        assert!(unchanged(settings.target_volume(), 0.4));
-        for (percent, target) in [("0", 0.0), ("60", 0.6), ("80", 0.8), ("100", 1.0)] {
-            assert!(unchanged(
-                Settings::parse(percent, "wardogs").unwrap().target_volume(),
-                target
-            ));
+        assert!(unchanged(settings.target_volume(0.8), 0.32));
+        assert!(unchanged(settings.target_volume(0.2), 0.08));
+        for (percent, target) in [("0", 0.0), ("60", 0.48), ("80", 0.64), ("100", 0.8)] {
+            let settings = Settings::parse(percent, "wardogs").unwrap();
+            assert!(unchanged(settings.target_volume(0.8), target));
+            assert!(unchanged(settings.target_volume(0.0), 0.0));
         }
         assert!(!unchanged(0.25, 0.4));
         assert!(unchanged(0.400001, 0.4));

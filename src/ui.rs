@@ -220,7 +220,7 @@ pub fn run() -> Result<(), String> {
         let (settings, initial_status, settings_warning) = match settings::load(&settings_path) {
             Ok(settings) => (
                 settings,
-                "F2 toggles game volume. Apply updates it immediately while ON.".to_string(),
+                "F2 keeps the chosen % of original volume. Apply updates it while ON.".to_string(),
                 false,
             ),
             Err(error) => (
@@ -419,7 +419,7 @@ impl App {
         self.control(
             instance,
             "STATIC",
-            "Game mixer volume (%)",
+            "Original volume kept (%)",
             20,
             56,
             230,
@@ -620,7 +620,7 @@ impl App {
                 Ok("Settings saved.".into())
             }
         } else {
-            Ok("Settings saved. F2 activates earplugs at this percentage.".into())
+            Ok("Settings saved. F2 keeps this percentage of the original game volume.".into())
         };
         if result.is_ok() {
             self.settings = new_settings;

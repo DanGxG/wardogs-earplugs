@@ -114,6 +114,22 @@ Not exercised end to end: a valid signed update, an actual newer public release 
 
 Versions up to v0.1.3 have no startup updater: v0.1.4 must be downloaded manually once. The feature requires write access to the EXE folder and never requests administrator access.
 
+## v0.1.5 relative volume
+
+The numeric setting now keeps a percentage of each session's original volume, captured on activation. An original 80% with 40 / 60 / 80 produces 32% / 48% / 64%. Apply always uses the captured original rather than the current or last-applied level. A fresh OFF/ON cycle captures the user's current mixer level. Saved settings retain their numbers and file format; their interpretation changes from the absolute targets used in v0.1.1–v0.1.4. The historical checks above describe those earlier releases.
+
+The original failures were reproduced before the fix: `Apply 60% must use the original session volume; expected=0.48, actual=0.6` and, against real Windows Core Audio, `40% of the original 80% must be 32%; actual=0.4`. Both original reproductions then passed.
+
+Passed locally on Windows with the GNU development build:
+
+- Formatting, Clippy with warnings denied, 24 ordinary tests and optimized compilation. Per-session originals 80% and 20% remain fixed during repeated Apply 60 / 80 / 40, and restore separately. Existing rollback/manual-edit and partial-restoration tests use the relative targets.
+- Real Windows mixer roundtrip, restart/inherited-volume recovery and multiple-instance recovery with silent fixtures. The roundtrip covers 80% -> 32 / 48 / 64 / 0 / 80 -> 80%; an original 20% becomes 8%, then restores to 20%. Manual 25% mixer changes remain preserved.
+- Five opt-in audio tests passed. Two additional regressions first failed: unchanged ended sessions (100% retained, or an original 0%) wrongly required a live replacement; and two ended originals at 40%/80%, applied as 16%/32%, could misclassify the replacement's owned 32% as a manual edit for the other record (`Restoration 1 discarded a conflicting original as a manual edit belonging to another record`). Unchanged records now complete without a recovery write. Conflicting replacements remain pending while matching any owned level, then preserve a genuinely different manual 25% level without requiring another restart.
+- Actual release controls, Apply, overlay ownership/placement/visibility, nested tray Close, Exit restoration, isolated settings/tray/single-instance/corrupt-background-startup checks and readiness checks. Synthetic keyboard input stays disabled so WarDogs can remain open.
+- The three simulated-offer updater UI cases still pass against the compiled app: No, bad hash and accepted replacement with saved preferences preserved.
+
+Representative GNU sample: EXE 462,336 bytes; working set 15,536,128 bytes; private memory 3,600,384 bytes; 0 ms CPU recorded over 15 idle seconds; 10 OS-observed threads. These are observations on this computer, not maximum guarantees.
+
 ## Not verified / external prerequisites
 
 - Real WarDogs executable name, game-specific audio routing, exclusive fullscreen hotkey delivery/overlay visibility and vendor anti-cheat acceptance: not tested with the actual game. Exclusive fullscreen may cover the independent desktop badge. The default `wardogs` filename filter is editable.

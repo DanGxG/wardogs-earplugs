@@ -41,6 +41,8 @@ struct Session {
     identity: SessionIdentity,
 }
 
+type ConflictingLevels = HashMap<(String, String), Vec<f32>>;
+
 #[derive(Default)]
 pub struct Audio {
     changed: Vec<ChangedSession>,
@@ -68,7 +70,7 @@ impl Audio {
             let previous =
                 unsafe { session.volume.GetMasterVolume() }.map_err(|e| e.to_string())?;
             pending.push(ChangedSession {
-                applied: settings.target_volume(),
+                applied: settings.target_volume(previous),
                 previous,
                 rollback: None,
                 identity: Some(session.identity),
@@ -94,7 +96,7 @@ impl Audio {
             self.changed.push(session);
         }
         Ok(format!(
-            "Earplugs ON: {} game session(s), {}%. F2 restores.",
+            "Earplugs ON: {} game session(s), {}% of original. F2 restores.",
             self.changed.len(),
             settings.percent
         ))
@@ -109,7 +111,6 @@ impl Audio {
         {
             return Err("An earlier volume update still needs recovery. Press F2 to restore before applying again.".into());
         }
-        let target = settings.target_volume();
         let (known, conflicts) = self.identities();
         for session in &mut self.changed {
             refresh_session(session, &known, &conflicts, false)?;
@@ -123,6 +124,7 @@ impl Audio {
             before.push((unsafe { session.volume.GetMasterVolume() }.map_err(|e| format!("Cannot update game volume: {e}. Press F2 to restore or clear the old sessions."))?, session.applied));
         }
         for index in 0..self.changed.len() {
+            let target = settings.target_volume(self.changed[index].previous);
             if let Err(error) = unsafe {
                 self.changed[index]
                     .volume
@@ -166,13 +168,16 @@ impl Audio {
             self.changed[index].applied = target;
         }
         Ok(format!(
-            "Earplugs ON: {} game session(s), {}%. F2 restores the original volume.",
+            "Earplugs ON: {} game session(s), {}% of original. F2 restores.",
             self.changed.len(),
             settings.percent
         ))
     }
 
     pub fn restore(&mut self) -> Result<String, String> {
+        // An unchanged level needs no recovery write, even if its session ended.
+        self.changed
+            .retain(|session| session.applied != session.rollback.unwrap_or(session.previous));
         let (known, conflicts) = self.identities();
         let mut failed = Vec::new();
         let mut manual = 0;
@@ -215,15 +220,20 @@ impl Audio {
         })
     }
 
-    fn identities(&self) -> (HashSet<String>, HashSet<(String, String)>) {
+    fn identities(&self) -> (HashSet<String>, ConflictingLevels) {
         let mut known = self.known_instances.clone();
         let mut targets = HashMap::new();
         let mut conflicts = HashSet::new();
+        let mut applied = ConflictingLevels::new();
         for session in &self.changed {
             if let Some(identity) = &session.identity {
                 known.insert(identity.instance.clone());
                 let key = (identity.endpoint.clone(), identity.session.clone());
                 let target = session.rollback.unwrap_or(session.previous);
+                applied
+                    .entry(key.clone())
+                    .or_default()
+                    .push(session.applied);
                 if targets
                     .insert(key.clone(), target)
                     .is_some_and(|old| !unchanged(old, target))
@@ -232,7 +242,8 @@ impl Audio {
                 }
             }
         }
-        (known, conflicts)
+        applied.retain(|key, _| conflicts.contains(key));
+        (known, applied)
     }
 }
 
@@ -249,7 +260,7 @@ fn session_is_live(session: &ChangedSession) -> bool {
 fn refresh_session(
     session: &mut ChangedSession,
     known: &HashSet<String>,
-    conflicts: &HashSet<(String, String)>,
+    conflicts: &ConflictingLevels,
     restoring: bool,
 ) -> Result<(), String> {
     let Some(identity) = &session.identity else {
@@ -264,8 +275,10 @@ fn refresh_session(
     let replacement = replacement_for(identity, known)?.ok_or_else(|| "Game audio ended or its output is unavailable. Restart the game or reconnect its output, then press F2 to restore. Earplugs keeps the original volume until then.".to_string())?;
     let current =
         unsafe { replacement.volume.GetMasterVolume() }.map_err(|error| error.to_string())?;
-    if conflicts.contains(&(identity.endpoint.clone(), identity.session.clone()))
-        && (!restoring || unchanged(current, session.applied))
+    // A shared replacement is manual only if it differs from every owned level.
+    if conflicts
+        .get(&(identity.endpoint.clone(), identity.session.clone()))
+        .is_some_and(|levels| !restoring || levels.iter().any(|level| unchanged(current, *level)))
     {
         return Err("Multiple ended game instances had different original levels. Set the new game's mixer level manually, then press F2 to preserve that change.".into());
     }
@@ -499,10 +512,35 @@ mod tests {
     }
 
     #[test]
+    fn reapply_uses_each_original_volume_without_compounding() {
+        let (first, first_state) = mock_session(0.32, 0.8, 0.32);
+        let (second, second_state) = mock_session(0.08, 0.2, 0.08);
+        let mut audio = Audio {
+            changed: vec![first, second],
+            ..Audio::default()
+        };
+        for (percent, targets) in [
+            ("60", [0.48, 0.12]),
+            ("80", [0.64, 0.16]),
+            ("40", [0.32, 0.08]),
+        ] {
+            audio
+                .reapply(&Settings::parse(percent, "wardogs").unwrap())
+                .unwrap();
+            for (state, target) in [(&first_state, targets[0]), (&second_state, targets[1])] {
+                assert!(unchanged(state.current.get(), target), "Apply {percent}% must use the original session volume; expected={target}, actual={}", state.current.get());
+            }
+        }
+        audio.restore().unwrap();
+        assert!(unchanged(first_state.current.get(), 0.8));
+        assert!(unchanged(second_state.current.get(), 0.2));
+    }
+
+    #[test]
     fn failed_apply_does_not_overwrite_a_new_manual_change() {
         let (first, first_state) = mock_session(0.4, 0.8, 0.4);
         let (second, second_state) = mock_session(0.4, 0.8, 0.4);
-        second_state.fail_value.set(Some(0.6));
+        second_state.fail_value.set(Some(0.48));
         let changed_manually = Rc::clone(&first_state);
         *second_state.on_failure.borrow_mut() =
             Some(Box::new(move || changed_manually.current.set(0.25)));
@@ -527,7 +565,7 @@ mod tests {
         let (first, first_state) = mock_session(0.25, 0.8, 0.4);
         let (second, second_state) = mock_session(0.4, 0.8, 0.4);
         first_state.fail_value.set(Some(0.25));
-        second_state.fail_value.set(Some(0.6));
+        second_state.fail_value.set(Some(0.48));
         let mut audio = Audio {
             changed: vec![first, second],
             ..Audio::default()
@@ -535,7 +573,7 @@ mod tests {
         assert!(audio
             .reapply(&Settings::parse("60", "wardogs").unwrap())
             .is_err());
-        assert!(unchanged(first_state.current.get(), 0.6));
+        assert!(unchanged(first_state.current.get(), 0.48));
         audio.restore().unwrap();
         assert!(
             unchanged(first_state.current.get(), 0.25),
@@ -549,7 +587,7 @@ mod tests {
         let (first, first_state) = mock_session(0.4, 0.8, 0.4);
         let (second, second_state) = mock_session(0.4, 0.8, 0.4);
         first_state.fail_value.set(Some(0.4));
-        second_state.fail_value.set(Some(0.6));
+        second_state.fail_value.set(Some(0.48));
         let mut audio = Audio {
             changed: vec![first, second],
             ..Audio::default()
@@ -652,7 +690,7 @@ mod tests {
             assert_ne!(restarted.identity.instance, original_identity.instance);
             assert!(unchanged(
                 unsafe { restarted.volume.GetMasterVolume().unwrap() },
-                0.4
+                0.32
             ));
             audio.restore().unwrap();
             assert!(!audio.is_lowered());
@@ -697,7 +735,7 @@ mod tests {
             assert!(
                 unchanged(
                     unsafe { replacement.volume.GetMasterVolume().unwrap() },
-                    0.6
+                    0.48
                 ),
                 "Apply did not update the restarted game's live session"
             );
@@ -843,6 +881,183 @@ mod tests {
         result.unwrap();
     }
 
+    #[test]
+    #[ignore = "Requires an active Windows audio output; first build the wardogs-test-tone example"]
+    fn expired_unchanged_session_does_not_need_recovery() {
+        let _serial = AUDIO_TEST.lock().unwrap();
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok().unwrap() };
+        let fixture = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("examples/wardogs-test-tone.exe");
+        let mut children = Vec::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut failures = Vec::new();
+            for (original, percent) in [(0.8, "100"), (0.0, "40")] {
+                let settings = Settings::parse(percent, "wardogs-test-tone.exe").unwrap();
+                children.push(std::process::Command::new(&fixture).spawn().unwrap());
+                let child = children.last_mut().unwrap();
+                let session = wait_for_fixture(&settings, child.id());
+                unsafe {
+                    session
+                        .volume
+                        .SetMasterVolume(original, std::ptr::null())
+                        .unwrap()
+                };
+                let mut audio = Audio::default();
+                audio.toggle(&settings).unwrap();
+                assert!(audio.is_lowered());
+                assert!(unchanged(
+                    unsafe { session.volume.GetMasterVolume().unwrap() },
+                    original
+                ));
+                child.kill().unwrap();
+                child.wait().unwrap();
+                let control: IAudioSessionControl = session.volume.cast().unwrap();
+                let expired = (0..50).any(|_| {
+                    if unsafe { control.GetState().unwrap() } == AudioSessionStateExpired {
+                        true
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        false
+                    }
+                });
+                assert!(expired, "Unchanged fixture session did not expire");
+                let restored = audio.restore();
+                if restored.is_err() || audio.is_lowered() {
+                    failures.push(format!("original={original}, retained={percent}%, restore={restored:?}, still_on={}", audio.is_lowered()));
+                }
+            }
+            assert!(
+                failures.is_empty(),
+                "Unchanged ended sessions incorrectly required recovery: {}",
+                failures.join("; ")
+            );
+        }));
+        for child in &mut children {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(
+                std::env::temp_dir().join(format!("wardogs-silent-fixture-{}.wav", child.id())),
+            );
+        }
+        unsafe { CoUninitialize() };
+        result.unwrap();
+    }
+
+    #[test]
+    #[ignore = "Requires an active Windows audio output; first build the wardogs-test-tone example"]
+    fn expired_relative_sessions_keep_conflict_until_manual_change() {
+        let _serial = AUDIO_TEST.lock().unwrap();
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok().unwrap() };
+        let fixture = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("examples/wardogs-test-tone.exe");
+        let settings = Settings::parse("40", "wardogs-test-tone.exe").unwrap();
+        let mut children = Vec::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            children.push(std::process::Command::new(&fixture).spawn().unwrap());
+            let first = wait_for_fixture(&settings, children[0].id());
+            unsafe { first.volume.SetMasterVolume(0.4, std::ptr::null()).unwrap() };
+            children.push(std::process::Command::new(&fixture).spawn().unwrap());
+            let second = wait_for_fixture(&settings, children[1].id());
+            unsafe {
+                second
+                    .volume
+                    .SetMasterVolume(0.8, std::ptr::null())
+                    .unwrap()
+            };
+            let mut audio = Audio::default();
+            audio.toggle(&settings).unwrap();
+            assert_eq!(audio.changed.len(), 2);
+            assert!(unchanged(
+                unsafe { first.volume.GetMasterVolume().unwrap() },
+                0.16
+            ));
+            assert!(unchanged(
+                unsafe { second.volume.GetMasterVolume().unwrap() },
+                0.32
+            ));
+            for child in &mut children {
+                child.kill().unwrap();
+                child.wait().unwrap();
+            }
+            for original in [&first, &second] {
+                let control: IAudioSessionControl = original.volume.cast().unwrap();
+                let expired = (0..50).any(|_| {
+                    if unsafe { control.GetState().unwrap() } == AudioSessionStateExpired {
+                        true
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        false
+                    }
+                });
+                assert!(expired, "Relative fixture session did not expire");
+            }
+            children.push(std::process::Command::new(&fixture).spawn().unwrap());
+            let replacement = wait_for_fixture(&settings, children[2].id());
+            assert_eq!(replacement.identity.endpoint, first.identity.endpoint);
+            assert_eq!(replacement.identity.session, first.identity.session);
+            assert_eq!(replacement.identity.session, second.identity.session);
+            unsafe {
+                replacement
+                    .volume
+                    .SetMasterVolume(0.32, std::ptr::null())
+                    .unwrap()
+            };
+            for attempt in 1..=2 {
+                assert!(
+                    audio.restore().is_err(),
+                    "Conflicting owned levels must remain unresolved"
+                );
+                assert!(audio.is_lowered());
+                assert!(unchanged(
+                    unsafe { replacement.volume.GetMasterVolume().unwrap() },
+                    0.32
+                ));
+                assert_eq!(audio.changed.len(), 2, "Restoration {attempt} discarded a conflicting original as a manual edit belonging to another record");
+                assert!(
+                    !audio
+                        .known_instances
+                        .contains(&replacement.identity.instance),
+                    "Restoration {attempt} adopted and excluded the unresolved replacement"
+                );
+            }
+            unsafe {
+                replacement
+                    .volume
+                    .SetMasterVolume(0.25, std::ptr::null())
+                    .unwrap()
+            };
+            audio.restore().unwrap();
+            assert!(!audio.is_lowered());
+            assert!(audio.changed.is_empty());
+            assert!(
+                unchanged(
+                    unsafe { replacement.volume.GetMasterVolume().unwrap() },
+                    0.25
+                ),
+                "The manual replacement level was overwritten"
+            );
+        }));
+        for child in &mut children {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(
+                std::env::temp_dir().join(format!("wardogs-silent-fixture-{}.wav", child.id())),
+            );
+        }
+        unsafe { CoUninitialize() };
+        result.unwrap();
+    }
+
     fn wait_for_fixture(settings: &Settings, pid: u32) -> Session {
         (0..50)
             .find_map(|_| {
@@ -894,8 +1109,12 @@ mod tests {
             let mut audio = Audio::default();
             audio.toggle(&settings).unwrap();
             assert!(audio.is_lowered());
-            assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.4));
-            for (percent, expected) in [("60", 0.6), ("80", 0.8), ("0", 0.0), ("100", 1.0)] {
+            let actual = unsafe { volume.GetMasterVolume().unwrap() };
+            assert!(
+                unchanged(actual, 0.32),
+                "40% of the original 80% must be 32%; actual={actual}"
+            );
+            for (percent, expected) in [("60", 0.48), ("80", 0.64), ("0", 0.0), ("100", 0.8)] {
                 audio
                     .reapply(&Settings::parse(percent, "wardogs-test-tone.exe").unwrap())
                     .unwrap();
@@ -920,7 +1139,10 @@ mod tests {
                 volume.SetMasterVolume(0.2, std::ptr::null()).unwrap();
             }
             audio.toggle(&settings).unwrap();
-            assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.4));
+            assert!(unchanged(
+                unsafe { volume.GetMasterVolume().unwrap() },
+                0.08
+            ));
             audio.restore().unwrap();
             assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.2));
             let mute = Settings::parse("0", "wardogs-test-tone.exe").unwrap();
@@ -1079,7 +1301,7 @@ mod tests {
                     },
                 },
             };
-            for expected in [0.4, 0.8, 0.4] {
+            for expected in [0.32, 0.8, 0.32] {
                 let foreground = unsafe { GetForegroundWindow() };
                 let key_state = [0x10, 0x11, 0x12, 0x5b, 0x5c, 0x71].map(|key| {
                     (key, unsafe {
@@ -1099,7 +1321,7 @@ mod tests {
                 }
                 let changed = (0..30).any(|_| {
                     if unchanged(unsafe { volume.GetMasterVolume().unwrap() }, expected)
-                        && unsafe { IsWindowVisible(overlay) }.as_bool() == (expected == 0.4)
+                        && unsafe { IsWindowVisible(overlay) }.as_bool() == (expected == 0.32)
                     {
                         true
                     } else {
@@ -1125,10 +1347,10 @@ mod tests {
                 );
                 assert_eq!(
                     unsafe { IsWindowVisible(overlay) }.as_bool(),
-                    expected == 0.4,
+                    expected == 0.32,
                     "Overlay visibility must follow F2 state"
                 );
-                if expected == 0.4 {
+                if expected == 0.32 {
                     let mut bounds = RECT::default();
                     unsafe {
                         GetWindowRect(overlay, &mut bounds).unwrap();
@@ -1144,20 +1366,20 @@ mod tests {
                         "Overlay must stay above normal windows"
                     );
                 }
-                if expected == 0.4 {
+                if expected == 0.32 {
                     use windows::{
                         core::PCWSTR,
                         Win32::UI::WindowsAndMessaging::{GetDlgItem, SendMessageW, WM_SETTEXT},
                     };
                     let percent = unsafe { GetDlgItem(Some(window), 201) }.unwrap();
                     for (text, target) in [
-                        ("60", 0.6),
-                        ("80", 0.8),
-                        ("10", 0.1),
+                        ("60", 0.48),
+                        ("80", 0.64),
+                        ("10", 0.08),
                         ("0", 0.0),
-                        ("100", 1.0),
-                        ("101", 1.0),
-                        ("40", 0.4),
+                        ("100", 0.8),
+                        ("101", 0.8),
+                        ("40", 0.32),
                     ] {
                         let value: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
                         unsafe {
@@ -1178,7 +1400,7 @@ mod tests {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            // Reproduce a persisted 40% mixer session: a new 60% target must be exact.
+            // A fresh activation must capture the user's current mixer level as its base.
             unsafe {
                 SendMessageW(window, WM_COMMAND, Some(WPARAM(102)), None);
             }
@@ -1200,8 +1422,8 @@ mod tests {
                 SendMessageW(window, WM_COMMAND, Some(WPARAM(102)), None);
             }
             assert!(
-                unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.6),
-                "New 60% target was incorrectly capped by the old 40% mixer level"
+                unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.24),
+                "60% of a new 40% original mixer level must be 24%"
             );
             assert!(unsafe { IsWindowVisible(overlay) }.as_bool());
             // Tray menus run a nested Windows message loop. Input received while
@@ -1238,7 +1460,7 @@ mod tests {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 assert!(
-                    unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.6),
+                    unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.24),
                     "Input was not deferred during the tray menu"
                 );
                 unsafe {
@@ -1271,7 +1493,10 @@ mod tests {
             unsafe {
                 SendMessageW(window, WM_COMMAND, Some(WPARAM(102)), None);
             }
-            assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.6));
+            assert!(unchanged(
+                unsafe { volume.GetMasterVolume().unwrap() },
+                0.24
+            ));
             // Closing while a tray menu holds App used to destroy the HWND
             // through DefWindowProc, stranding the process and its audio state.
             unsafe {
@@ -1339,7 +1564,10 @@ mod tests {
                 dismissed,
                 "A queued tray menu reopened ahead of Close, blocking the close request"
             );
-            assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.6));
+            assert!(unchanged(
+                unsafe { volume.GetMasterVolume().unwrap() },
+                0.24
+            ));
             if let Ok(seconds) = std::env::var("EARPLUGS_TEST_OVERLAY_PAUSE") {
                 println!("Release overlay is ON for visual/performance inspection.");
                 std::thread::sleep(std::time::Duration::from_secs(seconds.parse().unwrap()));
@@ -1572,12 +1800,12 @@ mod tests {
             }
             let _held = HeldKeys([*combination, &[0x71]].concat());
             keys(combination, false);
-            for expected in [0.4, 0.8] {
+            for expected in [0.32, 0.8] {
                 keys(&[0x71], false);
                 keys(&[0x71], true);
                 let changed = (0..30).any(|_| {
                     if unchanged(unsafe { volume.GetMasterVolume().unwrap() }, expected)
-                        && unsafe { IsWindowVisible(overlay) }.as_bool() == (expected == 0.4)
+                        && unsafe { IsWindowVisible(overlay) }.as_bool() == (expected == 0.32)
                     {
                         true
                     } else {
@@ -1592,7 +1820,7 @@ mod tests {
                 );
                 assert_eq!(
                     unsafe { IsWindowVisible(overlay) }.as_bool(),
-                    expected == 0.4
+                    expected == 0.32
                 );
                 assert!(!unsafe { IsWindowVisible(window) }.as_bool());
                 let foreground = unsafe { GetForegroundWindow() };
@@ -1616,7 +1844,10 @@ mod tests {
         let _held = HeldKeys(vec![0x71, 0xa0, 0xa2, 0xa4, 0x5b]);
         keys(&[0x71], false);
         std::thread::sleep(std::time::Duration::from_millis(100));
-        assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.4));
+        assert!(unchanged(
+            unsafe { volume.GetMasterVolume().unwrap() },
+            0.32
+        ));
         for modifier in [0xa0, 0xa2, 0xa4, 0x5b] {
             let mask = match modifier {
                 0xa0 => 4,
@@ -1633,14 +1864,14 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
             assert!(
-                unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.4),
+                unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.32),
                 "Held F2 repeated while adding modifier {modifier:x}"
             );
             keys(&[modifier], true);
             keys(&[0x71], false);
             std::thread::sleep(std::time::Duration::from_millis(100));
             assert!(
-                unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.4),
+                unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.32),
                 "Held F2 repeated while releasing modifier {modifier:x}"
             );
         }

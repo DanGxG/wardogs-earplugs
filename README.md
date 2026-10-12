@@ -1,16 +1,18 @@
 # WarDogs Earplugs
 
-A tiny native Windows tray app written in Rust. **F2 sets only WarDogs' Windows mixer volume to the chosen percentage (40% by default), then restores its previous level on the next press.** An independent top-left desktop badge displays **Earplugs ON** while active. Discord, music, other games and Windows master volume stay at their existing levels.
+A tiny native Windows tray app written in Rust. **F2 sets only WarDogs' Windows mixer volume to the chosen percentage of its original level (40% by default), then restores that original level on the next press.** An independent top-left desktop badge displays **Earplugs ON** while active. Discord, music, other games and Windows master volume stay at their existing levels.
 
 ## Use
 
 1. Download the Windows x64 release EXE, or unzip the portable package. Requires Windows 10/11 x64. No Python, installer or administrator access is needed.
-   For a manual update, **Exit the old version first**; launching a new copy while the old one is running reopens the old instance. Versions up to v0.1.3 cannot update themselves: install v0.1.4 manually once to get the startup update check.
+   For a manual update, **Exit the old version first**; launching a new copy while the old one is running reopens the old instance. Versions up to v0.1.3 cannot update themselves: install v0.1.5 manually once to get the startup update check. Version v0.1.4 can offer v0.1.5 when it starts.
 2. Run `wardogs-earplugs.exe` and start WarDogs so it creates a Windows audio session.
-3. Enter a whole **Game mixer volume (%)** from **0 to 100**. Default is **40**. This is an exact target mixer percentage, not a relative reduction or a ceiling: choosing 60 sets matching sessions to 60%, even if they were quieter.
-4. Leave **Game executable contains** at `wardogs`, or enter the actual name shown in Task Manager's **Details** tab. Matching ignores letter case. A complete name ending in `.exe` matches exactly; otherwise it matches that distinctive part of the filename. Click **Apply**. While earplugs are on, Apply updates the current sessions immediately, including changes from 40% to 60% or 80%, while keeping their original levels for restoration. It can refresh a restarted game's matching sessions; if restoration is already partly complete, finish recovery with F2 before applying again.
+3. Enter a whole **Original volume kept (%)** from **0 to 100**. Default is **40**. This is the percentage of each session's original Windows mixer volume to keep. Original levels are captured separately when you turn earplugs on. **0** silences the sessions; **100** keeps their original levels.
+4. Leave **Game executable contains** at `wardogs`, or enter the actual name shown in Task Manager's **Details** tab. Matching ignores letter case. A complete name ending in `.exe` matches exactly; otherwise it matches that distinctive part of the filename. Click **Apply**. While earplugs are on, Apply updates the sessions immediately using the same captured originals: with an original volume of **80%**, choosing **40 / 60 / 80** gives **32% / 48% / 64%**. Repeated Apply changes do not accumulate reductions. It can refresh a restarted game's matching sessions; if restoration is already partly complete, finish recovery with F2 before applying again.
 5. Press **F2** to turn earplugs on. Press **F2** again to restore the game; the badge hides when recovery completes. The Toggle button does the same thing.
 6. **Hide** or the window's close button keeps the app in the system tray. Click the tray icon to reopen settings; right-click for the menu. **Exit** restores volume and stops the app only when recovery completes.
+
+**Changed in v0.1.5:** saved numeric values are preserved, but now represent a percentage of the original volume. Versions v0.1.1–v0.1.4 used absolute mixer targets. A saved value of **40** with an original mixer level of **80%** now gives **32%**.
 
 `wardogs-earplugs.exe --background` starts directly in the tray when startup checks succeed; configuration errors show settings instead. For optional startup with Windows, create a shortcut to the EXE in `shell:startup`, with `--background` in its Target. The app never enables startup itself.
 
@@ -22,7 +24,7 @@ The badge is a small, independent Windows window at the top-left of the primary 
 
 ## Updates
 
-Version 0.1.4 checks GitHub's latest public `SHA256SUMS.txt` once at startup, including `--background`. A newer stable `major.minor.patch` version opens a Spanish **Sí / No** prompt with **No** selected by default. **No** keeps the current version and downloads no EXE. Offline checks, unavailable releases and an up-to-date copy stay silent. There is no periodic check or installed service.
+Version 0.1.5 checks GitHub's latest public `SHA256SUMS.txt` once at startup, including `--background`. A newer stable `major.minor.patch` version opens a Spanish **Sí / No** prompt with **No** selected by default. **No** keeps the current version and downloads no EXE. Offline checks, unavailable releases and an up-to-date copy stay silent. There is no periodic check or installed service.
 
 **Sí** downloads the offered version using the asset name and SHA-256 hash captured during the check. Native Windows HTTPS and streaming hashing verify the download against that manifest and check the Windows x64 executable format. Assets advertised as signed also require Windows Authenticode trust validation; unsigned assets remain unsigned. A matching hash proves agreement with the release manifest, not a trusted publisher signature.
 
@@ -49,11 +51,11 @@ The updater uses Windows WinHTTP, BCrypt and WinVerifyTrust without new Rust lib
 
 Anti-cheat classification belongs to the game's vendor; this implementation cannot promise approval or that a future policy will accept a background keyboard utility.
 
-Version 0.1.4 retains the device-state, startup and recovery behavior described here. Completed checks and remaining limits are recorded in [VALIDATION.md](VALIDATION.md). The full live keyboard matrix remains unverified.
+Version 0.1.5 retains the device-state, startup and recovery behavior described here. Completed checks and remaining limits are recorded in [VALIDATION.md](VALIDATION.md). The full live keyboard matrix remains unverified.
 
 Actions received during a tray menu or a nested Core Audio call are queued and processed after the current handler releases application state. Close and Exit cancel an open menu so the request can proceed; a nested close keeps its normal hide-to-tray behavior. Startup and shutdown use shared resource cleanup.
 
-Previous mixer volume and recovery records are kept in memory. Applying a new target while on keeps the original restoration level. Restore writes only when the current mixer level still matches the last value Earplugs applied, preserving newer manual mixer edits. The app does not change mute state.
+Previous mixer volume and recovery records are kept in memory. Each session's applied level is its captured original multiplied by the chosen percentage divided by 100. Apply uses that same original while earplugs remain on, and F2 captures fresh originals the next time you activate them. Restore writes only when the current mixer level still matches the last value Earplugs applied, preserving newer manual mixer edits. The app does not change mute state.
 
 **Turn earplugs OFF, or Exit, before closing the game when possible.** Writing to an expired session does not repair the mixer level inherited by a new game process. If the game has already closed or its output disappeared, keep Earplugs running, restart the game or reconnect its original output, then press F2 to finish recovery. Normal Exit refuses to stop while recovery remains pending. Windows shutdown attempts restoration, but a crash, power loss or force quit loses the in-memory recovery data; use Windows Volume Mixer to correct the level if needed.
 
@@ -65,7 +67,7 @@ To uninstall, Exit, delete the EXE and remove any startup shortcut you created. 
 
 ## Code signing policy
 
-**Trusted code signing is pending service enrollment/identity validation.** Version 0.1.4 is prepared for explicitly unsigned public distribution at the maintainer's request. The update prompt identifies unsigned downloads. The automated workflow keeps unsigned builds in drafts unless the maintainer chooses to publish them. Do not treat a checksum or a self-signed certificate as a trusted Authenticode signature.
+**Trusted code signing is pending service enrollment/identity validation.** Version 0.1.5 is prepared for explicitly unsigned public distribution at the maintainer's request. The update prompt identifies unsigned downloads. The automated workflow keeps unsigned builds in drafts unless the maintainer chooses to publish them. Do not treat a checksum or a self-signed certificate as a trusted Authenticode signature.
 
 The project includes a GitHub-hosted build and a SignPath signing stage. It publishes a signed release only after the returned EXE passes Windows Authenticode validation. See [SIGNING.md](SIGNING.md) for setup and certificate alternatives. The maintainer is [Daniel Grao / DanGxG](https://github.com/DanGxG). No signing provider is claimed to endorse or sign this project before acceptance.
 

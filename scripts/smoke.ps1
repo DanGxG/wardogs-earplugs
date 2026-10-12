@@ -89,6 +89,23 @@ try {
     [void][EarplugsSmoke]::PostMessage($window, 0x111, [IntPtr]104, [IntPtr]::Zero)
     Assert-True ($process.WaitForExit(5000)) 'Exit did not stop the app.'
     Assert-True ([EarplugsSmoke]::FindWindow('WarDogsEarplugsOverlay', 'Earplugs ON') -eq [IntPtr]::Zero) 'Overlay survived Exit.'
+    Set-Content -LiteralPath $config -Value 'corrupt' -Encoding utf8
+    $env:LOCALAPPDATA = $profileDirectory
+    $process = Start-Process -FilePath (Resolve-Path -LiteralPath $Executable).Path -ArgumentList '--background' -PassThru -WindowStyle Hidden
+    $env:LOCALAPPDATA = $previousLocalAppData
+    $window = [IntPtr]::Zero
+    for ($attempt = 0; $attempt -lt 50; $attempt++) {
+        $window = [EarplugsSmoke]::FindWindow('WarDogsEarplugsWindow', 'WarDogs Earplugs')
+        if ($window -ne [IntPtr]::Zero -and [EarplugsSmoke]::ChildTexts($window).Contains('Settings could not be loaded') -and [EarplugsSmoke]::IsWindowVisible($window)) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    Assert-True ([EarplugsSmoke]::IsWindowVisible($window)) 'Corrupt settings were silently hidden during background startup.'
+    Assert-True ([EarplugsSmoke]::ChildTexts($window).Contains('Settings could not be loaded')) 'Settings recovery warning missing.'
+    [void][EarplugsSmoke]::SendMessage($window, 0x111, [IntPtr]101, [IntPtr]::Zero)
+    Assert-True ((Get-Content -LiteralPath $config -Raw).Contains("40`nwardogs")) 'Apply did not repair corrupt settings.'
+    [void][EarplugsSmoke]::PostMessage($window, 0x111, [IntPtr]104, [IntPtr]::Zero)
+    Assert-True ($process.WaitForExit(5000)) 'Recovered startup did not exit normally.'
+    'PASS: corrupt settings are shown and repaired.'
 } finally {
     $env:LOCALAPPDATA = $previousLocalAppData
     if ($process -and -not $process.HasExited) {

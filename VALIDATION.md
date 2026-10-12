@@ -71,6 +71,30 @@ Passed locally:
 
 The full live modifier matrix and held-key Windows delivery remain unverified until a desktop is available without competing game focus/input. Unit input-state tests are not a substitute for those live checks.
 
+## v0.1.3 bug fixes and checks
+
+The original failing cases were reproduced before the corresponding fixes:
+
+- Two keyboards could release each other's F2 latch, making a held key toggle again. Input state now belongs to each keyboard; removal and power/session notifications clear stale state.
+- A close delivered inside the native tray menu could destroy the root window and strand the process. Close, Exit, Apply, toggle, Explorer restart and shutdown actions now wait until application state is available. Close/Exit dismiss the menu and discard queued menu reopenings.
+- A second launch could show a partially initialized window and exit before startup completed. An initialization event now provides a bounded startup wait. `scripts/startup-ready.ps1` reproduces this with an isolated window and named objects, without keyboard injection or audio access.
+- A competing settings writer could modify the published configuration through a shared staging handle. Each save now exclusively creates its own staging file; a failed replacement retains the old settings and removes its staging file.
+- Apply rollback could overwrite a newer manual mixer change, or lose a pre-Apply manual level when rollback failed. Rollback now checks ownership and retains a recovery target. Partial restoration blocks further Apply updates until recovery completes.
+- Corrupt settings during `--background` startup could hide the warning. The settings window now appears with defaults and the load error; Apply repairs the file.
+- Dropping expired sessions lost the original volume while Windows persisted the lowered level for the next game process. Setting an expired interface's volume also failed to repair the level inherited by the next process. Earplugs now retains recovery records and, on F2, finds a unique live replacement on the original endpoint using Windows' opaque session identifiers. Apply can refresh a restarted session while ON. Existing original instances remain excluded throughout recovery; conflicting original targets cannot be applied to one replacement.
+
+Passed locally on Windows, using the GNU development build:
+
+- Formatting, Clippy with warnings denied, 14 ordinary unit/filesystem/fault-injection tests and optimized compilation.
+- All three opt-in real-device tests with silent fixtures: mixer roundtrip; expiration/restart and inherited restoration; multiple-instance recovery. The restart test confirms 80% -> 40% -> process exit -> pending recovery -> new process -> 80%, then a further restart inherits 80%. It also checks Apply to a restarted session and preservation of a manual 25% change.
+- The multiple-instance test first reproduces the erroneous reuse of an already-restored original. Recovery now waits for a genuinely new session. Two ended instances with different originals also cannot overwrite a manual replacement through Apply; F2 preserves its manual level.
+- Actual release controls tested with `EARPLUGS_TEST_NO_INPUT=1`: exact 40/60/80/0/100% targets, restore, manual-edit preservation, missing-game handling, overlay visibility/placement/independence, close during a tray menu, queued menu cancellation and restore on Exit.
+- Isolated smoke checks: validation, persistence, tray hiding, duplicate launches, normal Exit and visible/repairable corrupt background settings. The startup-readiness fixture fails against the old release and passes against the fixed build.
+
+WarDogs remained open at the maintainer's request. These checks send no synthetic keyboard input; the full live global F2/modifier matrix remains unverified. Physical device unplug/replug, suspend/resume, session lock/unlock, output-device removal and actual Windows shutdown were implemented but not executed. Input reset sequences and partial recovery were checked through unit tests; those are not substitutes for live OS lifecycle tests.
+
+Recovery is held in memory. Turn OFF before closing the game when possible. If the game already ended or its original output disappeared, keep Earplugs running, reopen the game or reconnect that output, then press F2. Normal Exit refuses to discard pending recovery; a crash, forced termination or shutdown can lose it. No background polling or automatic restart monitor was added.
+
 ## Not verified / external prerequisites
 
 - Real WarDogs executable name, game-specific audio routing, exclusive fullscreen hotkey delivery/overlay visibility and vendor anti-cheat acceptance: not tested with the actual game. Exclusive fullscreen may cover the independent desktop badge. The default `wardogs` filename filter is editable.

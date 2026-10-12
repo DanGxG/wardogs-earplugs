@@ -76,25 +76,51 @@ pub fn unchanged(current: f32, applied: f32) -> bool {
     (current - applied).abs() < 0.0001
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Default)]
 pub struct F2Press {
-    down: bool,
+    down: Vec<usize>,
 }
 
 impl F2Press {
-    pub fn event(&mut self, key: u16, down: bool) -> bool {
+    pub fn event(&mut self, device: usize, key: u16, down: bool) -> bool {
         if key != 0x71 {
             return false;
         }
-        let first_press = down && !self.down;
-        self.down = down;
-        first_press
+        if down {
+            if self.down.contains(&device) {
+                return false;
+            }
+            self.down.push(device);
+            true
+        } else {
+            self.remove(device);
+            false
+        }
+    }
+
+    pub fn remove(&mut self, device: usize) {
+        self.down.retain(|held| *held != device);
+    }
+
+    pub fn reset(&mut self) {
+        self.down.clear();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn independent_keyboards_do_not_release_each_others_f2() {
+        let mut press = F2Press::default();
+        let events = [(1, true), (2, true), (2, false), (1, true), (1, false)];
+        let toggles: Vec<usize> = events
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, (device, down))| press.event(device, 0x71, down).then_some(index))
+            .collect();
+        assert_eq!(toggles, [0, 1], "Each keyboard press must toggle once; another keyboard's release must not rearm a held key");
+    }
     #[test]
     fn held_f2_ignores_repeat_and_modifier_changes_until_released() {
         let mut press = F2Press::default();
@@ -117,9 +143,20 @@ mod tests {
         let presses: Vec<usize> = events
             .into_iter()
             .enumerate()
-            .filter_map(|(index, (key, down))| press.event(key, down).then_some(index))
+            .filter_map(|(index, (key, down))| press.event(0, key, down).then_some(index))
             .collect();
         assert_eq!(presses, [2, 11], "Only fresh F2 presses may toggle");
+    }
+    #[test]
+    fn removal_and_resume_clear_stale_keyboard_state() {
+        let mut press = F2Press::default();
+        assert!(press.event(1, 0x71, true));
+        assert!(press.event(2, 0x71, true));
+        press.remove(1);
+        assert!(!press.event(2, 0x71, true));
+        assert!(press.event(1, 0x71, true));
+        press.reset();
+        assert!(press.event(2, 0x71, true));
     }
     #[test]
     fn defaults_and_persistence() {

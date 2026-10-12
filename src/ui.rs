@@ -6,6 +6,7 @@ use crate::{
 };
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     path::PathBuf,
 };
 use windows::{
@@ -13,20 +14,21 @@ use windows::{
     Win32::{
         Foundation::{
             CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT,
-            WPARAM,
+            WAIT_OBJECT_0, WPARAM,
         },
         Graphics::Gdi::{GetStockObject, COLOR_WINDOW, DEFAULT_GUI_FONT, HBRUSH},
         System::{
             Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED},
             LibraryLoader::GetModuleHandleW,
-            Threading::CreateMutexW,
+            RemoteDesktop::{WTSRegisterSessionNotification, WTSUnRegisterSessionNotification},
+            Threading::{CreateEventW, CreateMutexW, ResetEvent, SetEvent, WaitForSingleObject},
         },
         UI::{
             Controls::EM_SETLIMITTEXT,
             Input::{
                 GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE,
-                RAWINPUTHEADER, RAWKEYBOARD, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT,
-                RIM_TYPEKEYBOARD,
+                RAWINPUTHEADER, RAWKEYBOARD, RIDEV_DEVNOTIFY, RIDEV_INPUTSINK, RIDEV_REMOVE,
+                RID_INPUT, RIM_TYPEKEYBOARD,
             },
             Shell::{
                 Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
@@ -59,28 +61,88 @@ struct App {
     tray: NOTIFYICONDATAW,
     tray_ready: bool,
     input_ready: bool,
-    taskbar_created: u32,
+    session_notifications: bool,
     quit_requested: bool,
 }
 
 struct WindowState {
     app: RefCell<App>,
-    pending_toggles: Cell<usize>,
-    f2_press: Cell<F2Press>,
+    pending: RefCell<VecDeque<Action>>,
+    f2_press: RefCell<F2Press>,
+    taskbar_created: u32,
+    window_gone: Cell<bool>,
+}
+
+enum Action {
+    Apply,
+    Toggle,
+    Hide,
+    Exit,
+    Show,
+    Menu,
+    RecreateTray,
+    EndSession,
 }
 
 impl WindowState {
-    unsafe fn drain_toggles(&self) {
+    fn enqueue(&self, action: Action) {
+        let mut pending = self.pending.borrow_mut();
+        if matches!(action, Action::Menu)
+            && pending
+                .iter()
+                .any(|queued| matches!(queued, Action::Hide | Action::Exit | Action::EndSession))
+        {
+            return;
+        }
+        if matches!(action, Action::Hide | Action::Exit | Action::EndSession) {
+            pending.retain(|queued| !matches!(queued, Action::Menu));
+        }
+        if matches!(action, Action::EndSession) {
+            pending.push_front(action);
+        } else if matches!(action, Action::Hide | Action::Exit) {
+            let index = usize::from(matches!(pending.front(), Some(Action::EndSession)));
+            pending.insert(index, action);
+        } else {
+            pending.push_back(action);
+        }
+    }
+
+    unsafe fn drain_actions(&self) {
         let Ok(mut app) = self.app.try_borrow_mut() else {
             return;
         };
         loop {
-            let count = self.pending_toggles.replace(0);
-            if count == 0 || app.quit_requested {
+            if self.window_gone.get() || app.quit_requested {
+                self.pending.borrow_mut().clear();
                 return;
             }
-            for _ in 0..count {
-                app.toggle();
+            // Drop the queue borrow before any action can pump nested messages.
+            let action = { self.pending.borrow_mut().pop_front() };
+            let Some(action) = action else {
+                return;
+            };
+            match action {
+                Action::Toggle => app.toggle(),
+                Action::Apply => match app.save(true) {
+                    Ok(status) => app.set_status(&status),
+                    Err(error) => app.set_status(&error),
+                },
+                Action::Hide => app.hide(),
+                Action::Exit => app.exit(),
+                Action::Show => show_window(app.window),
+                Action::Menu => app.menu(),
+                Action::RecreateTray => {
+                    app.tray_ready = Shell_NotifyIconW(NIM_ADD, &app.tray).as_bool();
+                    if !app.tray_ready {
+                        show_window(app.window);
+                    }
+                }
+                Action::EndSession => {
+                    let _ = app.audio.restore();
+                    app.overlay.set_on(false);
+                    app.quit_requested = true;
+                    PostQuitMessage(0);
+                }
             }
         }
     }
@@ -125,25 +187,43 @@ pub fn run() -> Result<(), String> {
             CreateMutexW(None, false, w!("Local\\WarDogsEarplugs")).map_err(|e| e.to_string())?;
         let already_running = GetLastError() == ERROR_ALREADY_EXISTS;
         let _mutex = Handle(mutex);
+        let ready = Handle(
+            CreateEventW(None, true, false, w!("Local\\WarDogsEarplugsReady"))
+                .map_err(|e| e.to_string())?,
+        );
         if already_running {
+            // Also support reopening an initialized older version without a ready event.
             if let Ok(window) = FindWindowW(CLASS, None) {
-                show_window(window);
+                if GetWindowLongPtrW(window, GWLP_USERDATA) != 0 {
+                    show_window(window);
+                    return Ok(());
+                }
             }
-            return Ok(());
+            if WaitForSingleObject(ready.0, 5000) == WAIT_OBJECT_0 {
+                let window = FindWindowW(CLASS, None).map_err(|_| {
+                    "The running copy exited during startup. Start Earplugs again.".to_string()
+                })?;
+                show_window(window);
+                return Ok(());
+            }
+            return Err("The running copy did not finish starting within five seconds. Try opening it again.".into());
         }
+        ResetEvent(ready.0).map_err(|e| e.to_string())?;
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
             .ok()
             .map_err(|e| e.to_string())?;
         let _com = Com;
         let settings_path = settings::path().map_err(|e| e.to_string())?;
-        let (settings, initial_status) = match settings::load(&settings_path) {
+        let (settings, initial_status, settings_warning) = match settings::load(&settings_path) {
             Ok(settings) => (
                 settings,
                 "F2 toggles game volume. Apply updates it immediately while ON.".to_string(),
+                false,
             ),
             Err(error) => (
                 Settings::default(),
                 format!("Settings could not be loaded; using defaults. {error}"),
+                true,
             ),
         };
         let instance = HINSTANCE(GetModuleHandleW(None).map_err(|e| e.to_string())?.0);
@@ -188,11 +268,13 @@ pub fn run() -> Result<(), String> {
                 tray: NOTIFYICONDATAW::default(),
                 tray_ready: false,
                 input_ready: false,
-                taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
+                session_notifications: false,
                 quit_requested: false,
             }),
-            pending_toggles: Cell::new(0),
-            f2_press: Cell::new(F2Press::default()),
+            pending: RefCell::new(VecDeque::new()),
+            f2_press: RefCell::new(F2Press::default()),
+            taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
+            window_gone: Cell::new(false),
         });
         if let Err(error) = state.app.get_mut().initialize(instance, &initial_status) {
             let _ = DestroyWindow(window);
@@ -203,8 +285,13 @@ pub fn run() -> Result<(), String> {
             GWLP_USERDATA,
             (&*state as *const WindowState) as isize,
         );
+        let _ = SetEvent(ready.0);
         let background = std::env::args_os().skip(1).any(|arg| arg == "--background");
-        if !background || !state.app.borrow().tray_ready || !state.app.borrow().input_ready {
+        if !background
+            || settings_warning
+            || !state.app.borrow().tray_ready
+            || !state.app.borrow().input_ready
+        {
             show_window(window);
         }
         let mut message = MSG::default();
@@ -224,6 +311,9 @@ pub fn run() -> Result<(), String> {
         // State stays alive until the HWND can no longer dispatch callbacks.
         SetWindowLongPtrW(window, GWLP_USERDATA, 0);
         let _ = state.app.get_mut().audio.restore();
+        if state.app.get_mut().session_notifications {
+            let _ = WTSUnRegisterSessionNotification(window);
+        }
         if state.app.get_mut().tray_ready {
             let _ = Shell_NotifyIconW(NIM_DELETE, &state.app.get_mut().tray);
         }
@@ -363,24 +453,26 @@ impl App {
             WS_TABSTOP.0,
         )?;
         self.status = self.control(instance, "STATIC", status, 20, 212, 410, 60, 0, 0)?;
+        // Complete every fallible resource lookup before registering input.
+        self.tray.hIcon = LoadIconW(None, IDI_APPLICATION).map_err(|e| e.to_string())?;
         // A background input sink observes press/release events without taking
         // exclusive ownership of a shortcut, hooking input or disabling legacy keys.
         self.input_ready = RegisterRawInputDevices(
             &[RAWINPUTDEVICE {
                 usUsagePage: 1,
                 usUsage: 6,
-                dwFlags: RIDEV_INPUTSINK,
+                dwFlags: RIDEV_INPUTSINK | RIDEV_DEVNOTIFY,
                 hwndTarget: self.window,
             }],
             std::mem::size_of::<RAWINPUTDEVICE>() as u32,
         )
         .is_ok();
+        self.session_notifications = WTSRegisterSessionNotification(self.window, 0).is_ok();
         self.tray.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
         self.tray.hWnd = self.window;
         self.tray.uID = 1;
         self.tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         self.tray.uCallbackMessage = TRAY_MESSAGE;
-        self.tray.hIcon = LoadIconW(None, IDI_APPLICATION).map_err(|e| e.to_string())?;
         let tip = wide("WarDogs Earplugs | F2 lower / restore");
         self.tray.szTip[..tip.len()].copy_from_slice(&tip);
         self.tray_ready = Shell_NotifyIconW(NIM_ADD, &self.tray).as_bool();
@@ -447,7 +539,8 @@ impl App {
     unsafe fn save(&mut self, force: bool) -> Result<String, String> {
         let new_settings = Settings::parse(&self.input(self.percent), &self.input(self.executable))
             .map_err(str::to_string)?;
-        if force || new_settings != self.settings {
+        let preferences_saved = force || new_settings != self.settings;
+        if preferences_saved {
             settings::save(&self.settings_path, &new_settings)
                 .map_err(|e| format!("Could not save settings: {e}"))?;
         }
@@ -468,7 +561,13 @@ impl App {
             self.settings = new_settings;
         }
         self.overlay.set_on(self.audio.is_lowered());
-        result
+        result.map_err(|error| {
+            if preferences_saved {
+                format!("Preferences saved; {error}")
+            } else {
+                error
+            }
+        })
     }
 
     unsafe fn toggle(&mut self) {
@@ -554,7 +653,7 @@ unsafe extern "system" fn window_proc(
     let result = dispatch_message(state, window, message, wparam, lparam);
     // A tray menu or COM call can pump nested messages while App is borrowed.
     // Drain after the outer handler releases it, without reposting or polling.
-    state.drain_toggles();
+    state.drain_actions();
     result
 }
 
@@ -566,71 +665,80 @@ unsafe fn dispatch_message(
     lparam: LPARAM,
 ) -> LRESULT {
     if message == WM_INPUT {
-        if let Some((key, down)) = keyboard_event(lparam) {
-            let mut press = state.f2_press.get();
-            let toggle = press.event(key, down);
-            state.f2_press.set(press);
+        if let Some((device, key, down)) = keyboard_event(lparam) {
+            let toggle = state.f2_press.borrow_mut().event(device, key, down);
             if toggle {
-                state
-                    .pending_toggles
-                    .set(state.pending_toggles.get().saturating_add(1));
+                state.enqueue(Action::Toggle);
             }
         }
         // Foreground raw-input messages require Windows' default cleanup.
         return DefWindowProcW(window, message, wparam, lparam);
     }
-    // Windows may dispatch nested control notifications. Never alias mutable state.
-    if let Ok(mut app) = state.app.try_borrow_mut() {
-        if message == app.taskbar_created && app.taskbar_created != 0 {
-            app.tray_ready = Shell_NotifyIconW(NIM_ADD, &app.tray).as_bool();
-            if !app.tray_ready {
-                show_window(window);
-            }
-            return LRESULT(0);
-        }
+    if message == WM_INPUT_DEVICE_CHANGE && wparam.0 == GIDC_REMOVAL as usize {
+        state.f2_press.borrow_mut().remove(lparam.0 as usize);
+        return LRESULT(0);
+    }
+    if (message == WM_POWERBROADCAST
+        && matches!(
+            wparam.0 as u32,
+            PBT_APMSUSPEND | PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND | PBT_APMRESUMECRITICAL
+        ))
+        || (message == WM_WTSSESSION_CHANGE
+            && matches!(
+                wparam.0 as u32,
+                WTS_SESSION_LOCK
+                    | WTS_SESSION_UNLOCK
+                    | WTS_CONSOLE_DISCONNECT
+                    | WTS_REMOTE_DISCONNECT
+            ))
+    {
+        state.f2_press.borrow_mut().reset();
+        return LRESULT(1);
+    }
+    if message == WM_QUERYENDSESSION {
+        return LRESULT(1);
+    }
+    if message == WM_NCDESTROY {
+        SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+        state.window_gone.set(true);
+        PostQuitMessage(0);
+        return DefWindowProcW(window, message, wparam, lparam);
+    }
+    // Queue actions independently of App, including during menus and COM callbacks.
+    let action = if message == state.taskbar_created && state.taskbar_created != 0 {
+        Some(Action::RecreateTray)
+    } else {
         match message {
-            WM_COMMAND if (wparam.0 >> 16) == BN_CLICKED as usize => {
-                match wparam.0 & 0xffff {
-                    ID_SAVE => match app.save(true) {
-                        Ok(status) => app.set_status(&status),
-                        Err(error) => app.set_status(&error),
-                    },
-                    ID_TOGGLE => app.toggle(),
-                    ID_HIDE => app.hide(),
-                    ID_EXIT => app.exit(),
-                    _ => (),
-                }
-                return LRESULT(0);
-            }
-            WM_CLOSE => {
-                app.hide();
-                return LRESULT(0);
-            }
-            WM_QUERYENDSESSION => {
-                return LRESULT(1);
-            }
-            WM_ENDSESSION if wparam.0 != 0 => {
-                let _ = app.audio.restore();
-                app.overlay.set_on(false);
-                app.quit_requested = true;
-                PostQuitMessage(0);
-                return LRESULT(0);
-            }
-            TRAY_MESSAGE => {
-                match lparam.0 as u32 {
-                    WM_LBUTTONUP => show_window(window),
-                    WM_RBUTTONUP | WM_CONTEXTMENU => app.menu(),
-                    _ => (),
-                }
-                return LRESULT(0);
-            }
-            _ => (),
+            WM_COMMAND if (wparam.0 >> 16) == BN_CLICKED as usize => match wparam.0 & 0xffff {
+                ID_SAVE => Some(Action::Apply),
+                ID_TOGGLE => Some(Action::Toggle),
+                ID_HIDE => Some(Action::Hide),
+                ID_EXIT => Some(Action::Exit),
+                _ => None,
+            },
+            WM_CLOSE => Some(Action::Hide),
+            WM_ENDSESSION if wparam.0 != 0 => Some(Action::EndSession),
+            WM_ENDSESSION => return LRESULT(0),
+            TRAY_MESSAGE => match lparam.0 as u32 {
+                WM_LBUTTONUP => Some(Action::Show),
+                WM_RBUTTONUP | WM_CONTEXTMENU => Some(Action::Menu),
+                _ => None,
+            },
+            _ => None,
         }
+    };
+    if let Some(action) = action {
+        let end_menu = matches!(action, Action::Hide | Action::Exit | Action::EndSession);
+        state.enqueue(action);
+        if end_menu {
+            let _ = EndMenu();
+        }
+        return LRESULT(0);
     }
     DefWindowProcW(window, message, wparam, lparam)
 }
 
-unsafe fn keyboard_event(handle: LPARAM) -> Option<(u16, bool)> {
+unsafe fn keyboard_event(handle: LPARAM) -> Option<(usize, u16, bool)> {
     let mut input = RAWINPUT::default();
     let mut size = std::mem::size_of::<RAWINPUT>() as u32;
     let read = GetRawInputData(
@@ -648,5 +756,9 @@ unsafe fn keyboard_event(handle: LPARAM) -> Option<(u16, bool)> {
         return None;
     }
     let keyboard = input.data.keyboard;
-    Some((keyboard.VKey, keyboard.Flags & 1 == 0))
+    Some((
+        input.header.hDevice.0 as usize,
+        keyboard.VKey,
+        keyboard.Flags & 1 == 0,
+    ))
 }

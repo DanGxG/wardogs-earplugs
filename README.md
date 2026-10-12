@@ -8,13 +8,13 @@ A tiny native Windows tray app written in Rust. **F2 sets only WarDogs' Windows 
    When updating, **Exit the old version first**; launching a new copy while the old one is running reopens the old instance.
 2. Run `wardogs-earplugs.exe` and start WarDogs so it creates a Windows audio session.
 3. Enter a whole **Game mixer volume (%)** from **0 to 100**. Default is **40**. This is an exact target mixer percentage, not a relative reduction or a ceiling: choosing 60 sets matching sessions to 60%, even if they were quieter.
-4. Leave **Game executable contains** at `wardogs`, or enter the actual name shown in Task Manager's **Details** tab. Matching ignores letter case. A complete name ending in `.exe` matches exactly; otherwise it matches that distinctive part of the filename. Click **Apply**. While earplugs are on, Apply updates the current sessions immediately, including changes from 40% to 60% or 80%, while keeping their original levels for restoration.
-5. Press **F2** to turn earplugs on. Press **F2** again to restore the game and hide the badge. The Toggle button does the same thing.
-6. **Hide** or the window's close button keeps the app in the system tray. Click the tray icon to reopen settings; right-click for the menu. **Exit** restores volume and stops the app.
+4. Leave **Game executable contains** at `wardogs`, or enter the actual name shown in Task Manager's **Details** tab. Matching ignores letter case. A complete name ending in `.exe` matches exactly; otherwise it matches that distinctive part of the filename. Click **Apply**. While earplugs are on, Apply updates the current sessions immediately, including changes from 40% to 60% or 80%, while keeping their original levels for restoration. It can refresh a restarted game's matching sessions; if restoration is already partly complete, finish recovery with F2 before applying again.
+5. Press **F2** to turn earplugs on. Press **F2** again to restore the game; the badge hides when recovery completes. The Toggle button does the same thing.
+6. **Hide** or the window's close button keeps the app in the system tray. Click the tray icon to reopen settings; right-click for the menu. **Exit** restores volume and stops the app only when recovery completes.
 
-`wardogs-earplugs.exe --background` starts directly in the tray. For optional startup with Windows, create a shortcut to the EXE in `shell:startup`, with `--background` in its Target. The app never enables startup itself.
+`wardogs-earplugs.exe --background` starts directly in the tray when startup checks succeed; configuration errors show settings instead. For optional startup with Windows, create a shortcut to the EXE in `shell:startup`, with `--background` in its Target. The app never enables startup itself.
 
-F2 is observed through a Windows Raw Input background listener (`RIDEV_INPUTSINK`), independently of held movement keys or Ctrl, Shift, Alt and Windows modifiers. A press latch allows one toggle until F2 is released, including when modifiers change while F2 remains held. It uses no keyboard hooks or polling.
+F2 is observed through a Windows Raw Input background listener (`RIDEV_INPUTSINK`), independently of held movement keys or Ctrl, Shift, Alt and Windows modifiers. Press state is tracked per keyboard, allowing one toggle per F2 press even if modifiers change while it remains held. Removing a keyboard discards its held state; resume and session unlock clear stale state. It uses no keyboard hooks or polling.
 
 F2 and modifier+F2 combinations are still delivered normally to the game and other apps. Remove conflicting bindings if you want only the earplugs action; other Windows shortcuts continue to work. The full live keyboard matrix and game-specific input behavior remain unverified; see the testing limits below and [VALIDATION.md](VALIDATION.md).
 
@@ -25,9 +25,11 @@ The badge is a small, independent Windows window at the top-left of the primary 
 - One thread, native Win32 controls, native tray icon and a blocking Windows message loop.
 - No polling, timers, worker threads, embedded browser, Python interpreter, telemetry, updates or network traffic.
 - The keyboard listener wakes on Windows keyboard events, reads a fixed stack buffer and ignores non-F2 keys. It records no keyboard events or typed text.
-- Audio/process enumeration happens when turning earplugs on. Applying a new target and restoring use the saved Windows audio-session interfaces.
+- Audio/process enumeration happens only when a volume change or restoration needs it. Live sessions use saved Windows audio interfaces; recovery of ended sessions searches their original output endpoint. There is no restart monitor.
 - Ordinary unchanged F2 presses perform no settings-file writes.
 - One running instance per Windows login session. Release builds optimize for size and link the MSVC runtime statically.
+
+A startup readiness event lets a second launch wait for the existing instance to finish initialization before opening its settings. It adds no background polling.
 
 Memory and CPU depend on Windows, audio drivers and tray/UI state. See [VALIDATION.md](VALIDATION.md) for measured results and their limits.
 
@@ -37,15 +39,23 @@ Earplugs uses Windows Raw Input with `RegisterRawInputDevices` and `RIDEV_INPUTS
 
 Anti-cheat classification belongs to the game's vendor; this implementation cannot promise approval or that a future policy will accept a background keyboard utility.
 
-Previous mixer volume is kept in memory. Applying a new target while on keeps that original restoration level. Manual mixer changes made after the most recent Apply are preserved on restoration. A game restart or output-device change may create new sessions: press F2 to clear/restore the old sessions, then F2 again to set the new ones. Normal Exit and Windows shutdown attempt restoration. Forced termination, a crash or power loss cannot guarantee restoration; use Windows Volume Mixer if needed. The app does not change mute state.
+Version 0.1.3 includes the device-state, startup and recovery behavior described here. Completed checks and remaining limits are recorded in [VALIDATION.md](VALIDATION.md). The full live keyboard matrix remains unverified.
 
-Settings live at `%LOCALAPPDATA%\WarDogsEarplugs\settings.txt`. They are validated before activation, written to a same-directory temporary file, flushed, then atomically replaced using Windows `MoveFileExW` with write-through. A failed save keeps the previous active settings. Corrupt settings report an error and load safe defaults. This protects complete configuration writes under ordinary filesystem operation, but is not a database or a promise of full ACID transactions across Windows audio sessions. Multi-session volume changes are sequential and roll back completed changes if a later change fails.
+Actions received during a tray menu or a nested Core Audio call are queued and processed after the current handler releases application state. Close and Exit cancel an open menu so the request can proceed; a nested close keeps its normal hide-to-tray behavior. Startup and shutdown use shared resource cleanup.
+
+Previous mixer volume and recovery records are kept in memory. Applying a new target while on keeps the original restoration level. Restore writes only when the current mixer level still matches the last value Earplugs applied, preserving newer manual mixer edits. The app does not change mute state.
+
+**Turn earplugs OFF, or Exit, before closing the game when possible.** Writing to an expired session does not repair the mixer level inherited by a new game process. If the game has already closed or its output disappeared, keep Earplugs running, restart the game or reconnect its original output, then press F2 to finish recovery. Normal Exit refuses to stop while recovery remains pending. Windows shutdown attempts restoration, but a crash, power loss or force quit loses the in-memory recovery data; use Windows Volume Mixer to correct the level if needed.
+
+During F2, Apply or an Exit/shutdown restoration attempt, an ended session can be replaced only by a unique new live session on the same Windows output endpoint with the same opaque persistent audio-session identifier. All originally captured instances are excluded, including ones already restored, so one old record cannot claim another captured instance. If the match is missing or ambiguous, recovery remains pending. If ended instances had conflicting original levels, choose the correct Windows mixer level manually, then press F2 to preserve it; Apply will not choose one original level for you. An incomplete restoration blocks further Apply changes until F2 finishes. Recovery checks happen only when these volume actions run, with no polling or automatic restart detection.
+
+Settings live at `%LOCALAPPDATA%\WarDogsEarplugs\settings.txt`. They are validated before activation, written to a uniquely named same-directory temporary file created exclusively, flushed, then atomically replaced using Windows `MoveFileExW` with write-through. Separate writers use separate staging files; failed saves attempt to remove their own staging file. A failed file save keeps the previous active settings. Preferences can be saved even when their audio Apply fails: the status explicitly says **Preferences saved**, and the active filter stays unchanged until successful recovery/application. Corrupt settings report an error, use safe defaults and show the settings window even with `--background`. This protects complete configuration writes under ordinary filesystem operation, but is not a database or a promise of full ACID transactions across Windows audio sessions. Multi-session volume changes are sequential and roll back completed changes if a later change fails. Rollback preserves newer manual mixer edits, and an incomplete rollback retains its recovery target for the next F2 restoration attempt.
 
 To uninstall, Exit, delete the EXE and remove any startup shortcut you created. Optionally delete `%LOCALAPPDATA%\WarDogsEarplugs` to remove saved settings.
 
 ## Code signing policy
 
-**Trusted code signing is pending service enrollment/identity validation.** Version 0.1.0 is publicly available as an explicitly unsigned EXE, and v0.1.2 is prepared for explicitly unsigned public distribution at the maintainer's request. The automated workflow keeps unsigned builds in drafts unless the maintainer chooses to publish them. Do not treat a checksum or a self-signed certificate as a trusted Authenticode signature.
+**Trusted code signing is pending service enrollment/identity validation.** Version 0.1.0 is publicly available as an explicitly unsigned EXE, and v0.1.3 is prepared for explicitly unsigned public distribution at the maintainer's request. The automated workflow keeps unsigned builds in drafts unless the maintainer chooses to publish them. Do not treat a checksum or a self-signed certificate as a trusted Authenticode signature.
 
 The project includes a GitHub-hosted build and a SignPath signing stage. It publishes a signed release only after the returned EXE passes Windows Authenticode validation. See [SIGNING.md](SIGNING.md) for setup and certificate alternatives. The maintainer is [Daniel Grao / DanGxG](https://github.com/DanGxG). No signing provider is claimed to endorse or sign this project before acceptance.
 
@@ -73,6 +83,13 @@ cargo build --locked --example wardogs-test-tone
 cargo test --locked real_windows_mixer_roundtrip -- --ignored --nocapture
 ```
 
+Opt-in real-device tests for ended-session recovery and duplicate-instance exclusion use only silent fixture processes, with no keyboard injection:
+
+```powershell
+cargo test --locked expired_session_restores_persisted_volume -- --ignored --nocapture
+cargo test --locked restored_instance_is_not_reused_for_another_session -- --ignored --nocapture
+```
+
 To test real F2 delivery and restore-on-exit against a particular compiled EXE, close Earplugs first and set `$env:EARPLUGS_TEST_EXE` to that EXE's absolute path before running the mixer test. The normal test injects keyboard input through Windows and needs a quiet desktop with other games closed so its harmless keyboard fixture keeps focus.
 
 To leave a game or other app open, disable keyboard injection while checking the release's mixer changes, Apply controls, overlay and restore-on-exit:
@@ -83,14 +100,15 @@ cargo test --locked real_windows_mixer_roundtrip -- --ignored --nocapture
 Remove-Item Env:EARPLUGS_TEST_NO_INPUT
 ```
 
-This mode uses direct control messages and does not verify physical F2 delivery, held-key combinations or input deferral inside a tray menu. Six ordinary tests include a realistic movement-key, modifier-change and repeated-F2 sequence. The old Shift+W failure was reproduced in v0.1.1; an initial Raw Input live Shift+W check reached the expected mixer levels, but the full keyboard run failed because WarDogs reclaimed focus from the test fixture. The complete live keyboard matrix is still unverified.
+This mode uses direct control messages and does not verify physical F2 delivery, held-key combinations or input deferral inside a tray menu. Ordinary tests include movement-key, modifier-change, repeated-F2, multiple-keyboard and stale-state sequences. The old Shift+W failure was reproduced in v0.1.1; an initial Raw Input live Shift+W check reached the expected mixer levels, but the full keyboard run failed because WarDogs reclaimed focus from the test fixture. The complete live keyboard matrix is still unverified.
 
 To verify controls, persistence, tray hiding, duplicate launches and idle resource use:
 
 ```powershell
 ./scripts/smoke.ps1 -Executable ./target/release/wardogs-earplugs.exe
+./scripts/startup-ready.ps1 -Executable ./target/release/wardogs-earplugs.exe
 ```
 
-These tests use isolated settings and a silent fixture; they do not launch or inspect the game.
+The startup-ready test uses a private native window and named event to check that a second launch waits for initialization; it requires the real Earplugs app to be closed. These tests use isolated settings, private windows or silent fixtures; they do not launch or inspect the game.
 
 GitHub runners do not normally provide an audio output, so the real-device test is opt-in. It targets only `wardogs-test-tone.exe` and is never shipped. GNU builds can be used for development; the release workflow uses MSVC and embeds the app manifest and version resource.

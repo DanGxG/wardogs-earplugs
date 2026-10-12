@@ -34,6 +34,7 @@ Passed against the local GNU release build; the official MSVC release build, fin
 - Formatting, Clippy with warnings denied, five unit/filesystem tests and release compilation.
 - Real mixer reproduction: turn on at 40%, Apply 60%, Apply 80%, then restore the original volume; an initially quieter session reaches the chosen exact target; 0% and 100% targets; manual mixer changes and missing-game reporting.
 - Actual F2 delivery, repeated toggling and restore-on-exit against the release EXE.
+- A deterministic tray-menu regression first failed because a delivered hotkey was dropped while application state was borrowed. The counter-based deferral fix passed the same case: dismissing the menu restores the original volume and hides the badge.
 - UI validation and persistence, Apply while active, tray hiding, duplicate-instance handling and normal exit.
 - Overlay visibility only while on, primary-screen placement at (12, 12), no focus activation, transparent hit testing, topmost state, matching the Earplugs process ID, no owner window, and destruction on Exit.
 - Visual inspection of the actual onscreen badge: mint text on a small translucent black background, no clipping.

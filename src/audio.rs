@@ -527,6 +527,65 @@ mod tests {
                 "New 60% target was incorrectly capped by the old 40% mixer level"
             );
             assert!(unsafe { IsWindowVisible(overlay) }.as_bool());
+            // Tray menus run a nested Windows message loop. A delivered F2 must not be lost.
+            unsafe {
+                PostMessageW(
+                    Some(window),
+                    windows::Win32::UI::WindowsAndMessaging::WM_APP + 1,
+                    WPARAM(0),
+                    LPARAM(windows::Win32::UI::WindowsAndMessaging::WM_RBUTTONUP as isize),
+                )
+                .unwrap();
+            }
+            let menu_open = (0..30).any(|_| {
+                if let Ok(menu) = unsafe { FindWindowW(w!("#32768"), None) } {
+                    let mut menu_pid = 0;
+                    unsafe {
+                        GetWindowThreadProcessId(menu, Some(&mut menu_pid));
+                    }
+                    if menu_pid == app.id() && unsafe { IsWindowVisible(menu) }.as_bool() {
+                        return true;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                false
+            });
+            assert!(
+                menu_open,
+                "Tray popup did not open for reentrant hotkey regression"
+            );
+            unsafe {
+                SendMessageW(
+                    window,
+                    windows::Win32::UI::WindowsAndMessaging::WM_HOTKEY,
+                    Some(WPARAM(1)),
+                    None,
+                );
+                SendMessageW(
+                    window,
+                    windows::Win32::UI::WindowsAndMessaging::WM_CANCELMODE,
+                    None,
+                    None,
+                );
+            }
+            let restored = (0..30).any(|_| {
+                if unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.4) {
+                    true
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    false
+                }
+            });
+            assert!(
+                restored,
+                "F2 delivered during a tray menu was lost; expected 40%, actual={}",
+                unsafe { volume.GetMasterVolume().unwrap() }
+            );
+            assert!(!unsafe { IsWindowVisible(overlay) }.as_bool());
+            unsafe {
+                SendMessageW(window, WM_COMMAND, Some(WPARAM(102)), None);
+            }
+            assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.6));
             if let Ok(seconds) = std::env::var("EARPLUGS_TEST_OVERLAY_PAUSE") {
                 println!("Release overlay is ON for visual/performance inspection.");
                 std::thread::sleep(std::time::Duration::from_secs(seconds.parse().unwrap()));

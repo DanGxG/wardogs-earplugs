@@ -1,5 +1,8 @@
 use crate::{audio::Audio, model::Settings, overlay::Overlay, settings};
-use std::{cell::RefCell, path::PathBuf};
+use std::{
+    cell::{Cell, RefCell},
+    path::PathBuf,
+};
 use windows::{
     core::{w, PCWSTR},
     Win32::{
@@ -49,6 +52,29 @@ struct App {
     tray_ready: bool,
     hotkey_ready: bool,
     taskbar_created: u32,
+    quit_requested: bool,
+}
+
+struct WindowState {
+    app: RefCell<App>,
+    pending_toggles: Cell<usize>,
+}
+
+impl WindowState {
+    unsafe fn drain_toggles(&self) {
+        let Ok(mut app) = self.app.try_borrow_mut() else {
+            return;
+        };
+        loop {
+            let count = self.pending_toggles.replace(0);
+            if count == 0 || app.quit_requested {
+                return;
+            }
+            for _ in 0..count {
+                app.toggle();
+            }
+        }
+    }
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -140,31 +166,35 @@ pub fn run() -> Result<(), String> {
             None,
         )
         .map_err(|e| e.to_string())?;
-        let mut app = Box::new(RefCell::new(App {
-            window,
-            percent: HWND::default(),
-            executable: HWND::default(),
-            status: HWND::default(),
-            settings,
-            settings_path,
-            audio: Audio::default(),
-            overlay,
-            tray: NOTIFYICONDATAW::default(),
-            tray_ready: false,
-            hotkey_ready: false,
-            taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
-        }));
-        if let Err(error) = app.get_mut().initialize(instance, &initial_status) {
+        let mut state = Box::new(WindowState {
+            app: RefCell::new(App {
+                window,
+                percent: HWND::default(),
+                executable: HWND::default(),
+                status: HWND::default(),
+                settings,
+                settings_path,
+                audio: Audio::default(),
+                overlay,
+                tray: NOTIFYICONDATAW::default(),
+                tray_ready: false,
+                hotkey_ready: false,
+                taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
+                quit_requested: false,
+            }),
+            pending_toggles: Cell::new(0),
+        });
+        if let Err(error) = state.app.get_mut().initialize(instance, &initial_status) {
             let _ = DestroyWindow(window);
             return Err(error);
         }
         SetWindowLongPtrW(
             window,
             GWLP_USERDATA,
-            (&*app as *const RefCell<App>) as isize,
+            (&*state as *const WindowState) as isize,
         );
         let background = std::env::args_os().skip(1).any(|arg| arg == "--background");
-        if !background || !app.borrow().tray_ready || !app.borrow().hotkey_ready {
+        if !background || !state.app.borrow().tray_ready || !state.app.borrow().hotkey_ready {
             show_window(window);
         }
         let mut message = MSG::default();
@@ -182,14 +212,14 @@ pub fn run() -> Result<(), String> {
             }
         };
         // State stays alive until the HWND can no longer dispatch callbacks.
-        let _ = app.get_mut().audio.restore();
-        if app.get_mut().tray_ready {
-            let _ = Shell_NotifyIconW(NIM_DELETE, &app.get_mut().tray);
+        SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+        let _ = state.app.get_mut().audio.restore();
+        if state.app.get_mut().tray_ready {
+            let _ = Shell_NotifyIconW(NIM_DELETE, &state.app.get_mut().tray);
         }
-        if app.get_mut().hotkey_ready {
+        if state.app.get_mut().hotkey_ready {
             let _ = UnregisterHotKey(Some(window), HOTKEY);
         }
-        SetWindowLongPtrW(window, GWLP_USERDATA, 0);
         let _ = DestroyWindow(window);
         result
     }
@@ -446,6 +476,7 @@ impl App {
             show_window(self.window);
             return;
         }
+        self.quit_requested = true;
         PostQuitMessage(0);
     }
 
@@ -487,59 +518,81 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    let pointer = GetWindowLongPtrW(window, GWLP_USERDATA) as *const RefCell<App>;
-    if !pointer.is_null() {
-        // Windows may dispatch nested control notifications. Never alias mutable state.
-        if let Ok(mut app) = (*pointer).try_borrow_mut() {
-            if message == app.taskbar_created && app.taskbar_created != 0 {
-                app.tray_ready = Shell_NotifyIconW(NIM_ADD, &app.tray).as_bool();
-                if !app.tray_ready {
-                    show_window(window);
+    let pointer = GetWindowLongPtrW(window, GWLP_USERDATA) as *const WindowState;
+    if pointer.is_null() {
+        return DefWindowProcW(window, message, wparam, lparam);
+    }
+    let state = &*pointer;
+    let result = dispatch_message(state, window, message, wparam, lparam);
+    // A tray menu or COM call can pump nested messages while App is borrowed.
+    // Drain after the outer handler releases it, without reposting or polling.
+    state.drain_toggles();
+    result
+}
+
+unsafe fn dispatch_message(
+    state: &WindowState,
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // Windows may dispatch nested control notifications. Never alias mutable state.
+    if let Ok(mut app) = state.app.try_borrow_mut() {
+        if message == app.taskbar_created && app.taskbar_created != 0 {
+            app.tray_ready = Shell_NotifyIconW(NIM_ADD, &app.tray).as_bool();
+            if !app.tray_ready {
+                show_window(window);
+            }
+            return LRESULT(0);
+        }
+        match message {
+            WM_HOTKEY if wparam.0 == HOTKEY as usize => {
+                app.toggle();
+                return LRESULT(0);
+            }
+            WM_COMMAND if (wparam.0 >> 16) == BN_CLICKED as usize => {
+                match wparam.0 & 0xffff {
+                    ID_SAVE => match app.save(true) {
+                        Ok(status) => app.set_status(&status),
+                        Err(error) => app.set_status(&error),
+                    },
+                    ID_TOGGLE => app.toggle(),
+                    ID_HIDE => app.hide(),
+                    ID_EXIT => app.exit(),
+                    _ => (),
                 }
                 return LRESULT(0);
             }
-            match message {
-                WM_HOTKEY if wparam.0 == HOTKEY as usize => {
-                    app.toggle();
-                    return LRESULT(0);
-                }
-                WM_COMMAND if (wparam.0 >> 16) == BN_CLICKED as usize => {
-                    match wparam.0 & 0xffff {
-                        ID_SAVE => match app.save(true) {
-                            Ok(status) => app.set_status(&status),
-                            Err(error) => app.set_status(&error),
-                        },
-                        ID_TOGGLE => app.toggle(),
-                        ID_HIDE => app.hide(),
-                        ID_EXIT => app.exit(),
-                        _ => (),
-                    }
-                    return LRESULT(0);
-                }
-                WM_CLOSE => {
-                    app.hide();
-                    return LRESULT(0);
-                }
-                WM_QUERYENDSESSION => {
-                    return LRESULT(1);
-                }
-                WM_ENDSESSION if wparam.0 != 0 => {
-                    let _ = app.audio.restore();
-                    app.overlay.set_on(false);
-                    PostQuitMessage(0);
-                    return LRESULT(0);
-                }
-                TRAY_MESSAGE => {
-                    match lparam.0 as u32 {
-                        WM_LBUTTONUP => show_window(window),
-                        WM_RBUTTONUP | WM_CONTEXTMENU => app.menu(),
-                        _ => (),
-                    }
-                    return LRESULT(0);
-                }
-                _ => (),
+            WM_CLOSE => {
+                app.hide();
+                return LRESULT(0);
             }
+            WM_QUERYENDSESSION => {
+                return LRESULT(1);
+            }
+            WM_ENDSESSION if wparam.0 != 0 => {
+                let _ = app.audio.restore();
+                app.overlay.set_on(false);
+                app.quit_requested = true;
+                PostQuitMessage(0);
+                return LRESULT(0);
+            }
+            TRAY_MESSAGE => {
+                match lparam.0 as u32 {
+                    WM_LBUTTONUP => show_window(window),
+                    WM_RBUTTONUP | WM_CONTEXTMENU => app.menu(),
+                    _ => (),
+                }
+                return LRESULT(0);
+            }
+            _ => (),
         }
+    } else if message == WM_HOTKEY && wparam.0 == HOTKEY as usize {
+        state
+            .pending_toggles
+            .set(state.pending_toggles.get().saturating_add(1));
+        return LRESULT(0);
     }
     DefWindowProcW(window, message, wparam, lparam)
 }

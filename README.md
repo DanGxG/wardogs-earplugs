@@ -4,9 +4,9 @@ A tiny native Windows tray app written in Rust. **F2 sets only WarDogs' Windows 
 
 ## Use
 
-1. Download the Windows x64 release EXE, or unzip the portable package. Requires Windows 10/11 x64. No Python, installer or administrator access is needed.
-   For a manual update, **Exit the old version first**; launching a new copy while the old one is running reopens the old instance. Versions up to v0.1.3 cannot update themselves: install v0.1.5 manually once to get the startup update check. Version v0.1.4 can offer v0.1.5 when it starts.
-2. Run `wardogs-earplugs.exe` and start WarDogs so it creates a Windows audio session.
+1. Download `wardogs-earplugs-v0.1.6-windows-x64.exe`, or unzip `wardogs-earplugs-v0.1.6-windows-x64.zip`. Requires Windows 10/11 x64. No Python, installer or administrator access is needed.
+   For a manual update, **Exit the old version first**; launching a new copy while the old one is running reopens the old instance. Versions up to v0.1.5 need a one-time manual installation of v0.1.6. Starting with v0.1.6, future releases can be installed through the startup update prompt.
+2. Run the downloaded or unpacked EXE and start WarDogs so it creates a Windows audio session.
 3. Enter a whole **Original volume kept (%)** from **0 to 100**. Default is **40**. This is the percentage of each session's original Windows mixer volume to keep. Original levels are captured separately when you turn earplugs on. **0** silences the sessions; **100** keeps their original levels.
 4. Leave **Game executable contains** at `wardogs`, or enter the actual name shown in Task Manager's **Details** tab. Matching ignores letter case. A complete name ending in `.exe` matches exactly; otherwise it matches that distinctive part of the filename. Click **Apply**. While earplugs are on, Apply updates the sessions immediately using the same captured originals: with an original volume of **80%**, choosing **40 / 60 / 80** gives **32% / 48% / 64%**. Repeated Apply changes do not accumulate reductions. It can refresh a restarted game's matching sessions; if restoration is already partly complete, finish recovery with F2 before applying again.
 5. Press **F2** to turn earplugs on. Press **F2** again to restore the game; the badge hides when recovery completes. The Toggle button does the same thing.
@@ -24,9 +24,9 @@ The badge is a small, independent Windows window at the top-left of the primary 
 
 ## Updates
 
-Version 0.1.5 checks GitHub's latest public `SHA256SUMS.txt` once at startup, including `--background`. A newer stable `major.minor.patch` version opens a Spanish **Sí / No** prompt with **No** selected by default. **No** keeps the current version and downloads no EXE. Offline checks, unavailable releases and an up-to-date copy stay silent. There is no periodic check or installed service.
+Version 0.1.6 checks GitHub's latest public `SHA256SUMS.txt` once at startup, including `--background`. A newer stable `major.minor.patch` version opens a Spanish **Sí / No** prompt with **No** selected by default. **No** keeps the current version and downloads no EXE. Offline checks, unavailable releases and an up-to-date copy stay silent. There is no periodic check or installed service.
 
-**Sí** downloads the offered version using the asset name and SHA-256 hash captured during the check. Native Windows HTTPS and streaming hashing verify the download against that manifest and check the Windows x64 executable format. Assets advertised as signed also require Windows Authenticode trust validation; unsigned assets remain unsigned. A matching hash proves agreement with the release manifest, not a trusted publisher signature.
+**Sí** downloads the offered version using the asset name and SHA-256 hash captured during the check. Native Windows HTTPS and streaming hashing verify the download against that manifest and check the Windows x64 executable format. Releases whose manifest requires Authenticode also undergo Windows signature validation.
 
 Before replacement, Earplugs restores the game volume. Failed recovery or handoff cancels the update and keeps the current app open. A temporary helper waits for its Earplugs parent to exit, backs up the old EXE, replaces it at the same path and restarts with the same settings and current tray/window mode. It removes the backup only after the new app's UI reports readiness; a failed startup restores the previous EXE. Updating requires write permission to the EXE folder and does not request administrator access. If that folder is protected, update manually from a writable location.
 
@@ -51,7 +51,7 @@ The updater uses Windows WinHTTP, BCrypt and WinVerifyTrust without new Rust lib
 
 Anti-cheat classification belongs to the game's vendor; this implementation cannot promise approval or that a future policy will accept a background keyboard utility.
 
-Version 0.1.5 retains the device-state, startup and recovery behavior described here. Completed checks and remaining limits are recorded in [VALIDATION.md](VALIDATION.md). The full live keyboard matrix remains unverified.
+Version 0.1.6 retains the device-state, startup and recovery behavior described here. Completed checks and remaining limits are recorded in [VALIDATION.md](VALIDATION.md). The full live keyboard matrix remains unverified.
 
 Actions received during a tray menu or a nested Core Audio call are queued and processed after the current handler releases application state. Close and Exit cancel an open menu so the request can proceed; a nested close keeps its normal hide-to-tray behavior. Startup and shutdown use shared resource cleanup.
 
@@ -65,13 +65,11 @@ Settings live at `%LOCALAPPDATA%\WarDogsEarplugs\settings.txt`. They are validat
 
 To uninstall, Exit, delete the EXE and remove any startup shortcut you created. Optionally delete `%LOCALAPPDATA%\WarDogsEarplugs` to remove saved settings.
 
-## Code signing policy
+## Author and project
 
-**Trusted code signing is pending service enrollment/identity validation.** Version 0.1.5 is prepared for explicitly unsigned public distribution at the maintainer's request. The update prompt identifies unsigned downloads. The automated workflow keeps unsigned builds in drafts unless the maintainer chooses to publish them. Do not treat a checksum or a self-signed certificate as a trusted Authenticode signature.
+Windows **File Properties → Details** lists **Daniel Grao**, the individual author, in **Company name**, alongside the product description, version, copyright and MIT license details. A dedicated earplugs icon appears in Explorer, the app window and tray; the settings footer shows the version and MIT license. This independent utility has no official WarDogs affiliation.
 
-The project includes a GitHub-hosted build and a SignPath signing stage. It publishes a signed release only after the returned EXE passes Windows Authenticode validation. See [SIGNING.md](SIGNING.md) for setup and certificate alternatives. The maintainer is [Daniel Grao / DanGxG](https://github.com/DanGxG). No signing provider is claimed to endorse or sign this project before acceptance.
-
-Signed applications can still receive SmartScreen or antivirus reputation warnings, especially for a new publisher. Signing identifies the publisher and protects file integrity; it does not guarantee zero warnings. See [Microsoft's SmartScreen guidance](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation).
+The maintainer is [Daniel Grao / DanGxG](https://github.com/DanGxG). The project uses a GitHub-hosted build; [SIGNING.md](SIGNING.md) describes optional code signing for maintainers.
 
 **Privacy:** update checks and accepted downloads connect to GitHub and its public download CDN over HTTPS. Those services receive ordinary HTTP request metadata; Earplugs sends no game data, keyboard events, typed text or saved configuration and has no telemetry. Preferences remain local. Its source and build workflows are public.
 

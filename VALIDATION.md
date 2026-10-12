@@ -25,7 +25,7 @@ The app creates one UI thread; Windows/COM may create internal threads. Working 
 - Visual inspection of the actual native window: numeric fields, labels, buttons and status fit without clipping.
 - Microsoft Defender custom scan of the GitHub-built EXE completed with no matching threat detection reported on this computer. This does not establish a universal antivirus result.
 
-The final tagged build repeats CI validation. The signing stage requires a `Valid` trusted Authenticode signature before publishing through that path; the maintainer can explicitly publish unsigned assets. SHA-256 checksums are generated from the actual release assets.
+The final tagged build repeats CI validation. The optional signing stage requires a `Valid` Authenticode result before publishing through that path. SHA-256 checksums are generated from the actual release assets.
 
 ## v0.1.1 checks
 
@@ -97,14 +97,14 @@ Recovery is held in memory. Turn OFF before closing the game when possible. If t
 
 ## v0.1.4 startup updates
 
-The app now checks GitHub's latest public checksum manifest once when its primary instance starts, including background startup. It offers a newer stable version through a native Spanish update dialog with No as the default. Declining performs no executable download. Accepted downloads keep the offered version/name/hash fixed, use Windows HTTPS and streaming SHA-256, reject unsupported executable formats, and require Authenticode trust for assets advertised as signed. A hash does not sign an unsigned asset.
+The app now checks GitHub's latest public checksum manifest once when its primary instance starts, including background startup. It offers a newer stable version through a native Spanish update dialog with No as the default. Declining performs no executable download. Accepted downloads keep the offered version/name/hash fixed, use Windows HTTPS and streaming SHA-256, reject unsupported executable formats, and apply the manifest's Authenticode requirement.
 
 The updater adds Windows WinHTTP, BCrypt and WinVerifyTrust APIs, with no new Rust libraries. A temporary Rust worker performs each check/download and finishes afterward; normal Exit cancels and joins it so its staging-file cleanup completes. Windows HTTP/crypto/COM may retain internal threads and caches. The helper validates its actual parent PID and initialized Earplugs window before opening that parent, prepares and verifies the replacement before handoff, waits for the old process, replaces with a backup, and confirms the new UI's PID/readiness before deleting the backup. Recovery restarts the original with a failure notice and helper cleanup.
 
 Passed locally on Windows with the GNU development build:
 
 - Formatting and Clippy with warnings denied; 23 ordinary tests including numeric version ordering, invalid/ambiguous manifest rejection, HTTPS/redirect host restrictions, the known SHA-256 vector, normal-Exit worker cleanup, corrupt payload/preparation rejection, a locked destination, missing-target recovery and rollback after failed initialization.
-- Native Windows HTTPS against the public GitHub release: checksum manifest retrieval, streaming EXE download, digest and x64 validation, mismatch rejection, rejection of an unsigned EXE advertised as signed, and staging cleanup. No GitHub token is used by the app.
+- Native Windows HTTPS against the public GitHub release: checksum manifest retrieval, streaming EXE download, digest and x64 validation, mismatch and Authenticode-policy rejection, and staging cleanup. No GitHub token is used by the app.
 - `scripts/test-updater.ps1` tests a simulated newer offer in the test-only UI harness against a real compiled app. No keeps the old EXE with no staging; a bad hash shows the checksum error and preserves the old EXE; Yes replaces and restarts into the real new app, preserving saved 55%/filter settings and window mode, then removes helper/backup files. Test injection is compiled only into the test harness and is absent from the production EXE. Controls are targeted by owned PID, with no keyboard injection or game interaction.
 - Release mixer/UI checks with `EARPLUGS_TEST_NO_INPUT=1`, isolated settings/tray/single-instance/corrupt-startup smoke checks, and normal Exit remained green.
 
@@ -130,9 +130,16 @@ Passed locally on Windows with the GNU development build:
 
 Representative GNU sample: EXE 462,336 bytes; working set 15,536,128 bytes; private memory 3,600,384 bytes; 0 ms CPU recorded over 15 idle seconds; 10 OS-observed threads. These are observations on this computer, not maximum guarantees.
 
+## v0.1.6 release presentation and update format
+
+Release resources define Daniel Grao as the individual author in CompanyName, with product/file version information, internal/original filename, copyright, MIT license, website and public source references. The app window shows only its version and MIT license. Dedicated icons are embedded for Explorer/window and the small titlebar/tray view. The ICO sources and a build-only regeneration script are included; no image generator runs with the app.
+
+Downloads use the canonical `wardogs-earplugs-v0.1.6-windows-x64.exe` / `.zip` names. The checksum manifest starts with `# earplugs-release-v2`; its optional `# authenticode-required` policy retains Windows trust verification when required. Unknown, missing, repeated or displaced policies, duplicate/ambiguous EXEs and invalid hashes/paths remain rejected. Versions up to v0.1.5 need a manual v0.1.6 installation once, because their update parser uses the earlier filename-based policy.
+
+Passed locally with the GNU development build: formatting, Clippy with warnings denied, 24 ordinary tests, optimized compilation, mixer/Apply/overlay/Exit checks with keyboard injection disabled, three simulated-offer updater UI cases, settings/tray/single-instance/corrupt-background-startup checks and readiness checks. The new-format manifest regression first failed with `Invalid SHA-256 manifest.`, then passed after the parser change. Canonical packaging was executed and the generated EXE/ZIP checksums matched its manifest. MSVC release resources are provided by the GitHub-hosted build; the GNU development build does not embed those resources.
+
 ## Not verified / external prerequisites
 
 - Real WarDogs executable name, game-specific audio routing, exclusive fullscreen hotkey delivery/overlay visibility and vendor anti-cheat acceptance: not tested with the actual game. Exclusive fullscreen may cover the independent desktop badge. The default `wardogs` filename filter is editable.
-- Trusted Authenticode signing: pending an approved provider/account and identity validation. Releases are explicitly unsigned by maintainer request; no release is claimed to have a trusted Authenticode signature.
 - Zero SmartScreen/antivirus warnings on friends' PCs: cannot be guaranteed by signing or by the local scan.
 - Hard crashes/power failures cannot guarantee volume restoration. Settings replacement is atomic under normal same-volume filesystem operation; Windows audio sessions are not an ACID database.

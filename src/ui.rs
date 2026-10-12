@@ -155,6 +155,25 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
+unsafe fn application_icon(instance: HINSTANCE, small: bool) -> Result<HICON, String> {
+    let (width, height) = if small {
+        (SM_CXSMICON, SM_CYSMICON)
+    } else {
+        (SM_CXICON, SM_CYICON)
+    };
+    LoadImageW(
+        Some(instance),
+        PCWSTR(std::ptr::without_provenance(if small { 2 } else { 1 })),
+        IMAGE_ICON,
+        GetSystemMetrics(width),
+        GetSystemMetrics(height),
+        LR_SHARED,
+    )
+    .map(|icon| HICON(icon.0))
+    .or_else(|_| LoadIconW(None, IDI_APPLICATION))
+    .map_err(|e| e.to_string())
+}
+
 pub fn startup_error(error: &str) {
     let message = wide(error);
     unsafe {
@@ -235,7 +254,7 @@ pub fn run() -> Result<(), String> {
             hInstance: instance,
             lpszClassName: CLASS,
             hCursor: LoadCursorW(None, IDC_ARROW).map_err(|e| e.to_string())?,
-            hIcon: LoadIconW(None, IDI_APPLICATION).map_err(|e| e.to_string())?,
+            hIcon: application_icon(instance, false)?,
             hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as usize as *mut _),
             ..Default::default()
         };
@@ -251,7 +270,7 @@ pub fn run() -> Result<(), String> {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             464,
-            320,
+            344,
             None,
             None,
             Some(instance),
@@ -348,12 +367,7 @@ impl App {
         let event = self.updater.as_mut().and_then(update::Updater::receive);
         match event {
             Some(update::Event::Checked(Ok(Some(release)))) => {
-                let unsigned = if release.unsigned {
-                    "\n\nEsta versión no está firmada digitalmente."
-                } else {
-                    ""
-                };
-                let prompt = wide(&format!("Hay una nueva versión de WarDogs Earplugs: {} (actual: {}).\n\n¿Quieres descargarla e instalarla ahora? La aplicación se reiniciará y conservará tus ajustes.{unsigned}", release.version, env!("CARGO_PKG_VERSION")));
+                let prompt = wide(&format!("Hay una nueva versión de WarDogs Earplugs: {} (actual: {}).\n\n¿Quieres descargarla e instalarla ahora? La aplicación se reiniciará y conservará tus ajustes.", release.version, env!("CARGO_PKG_VERSION")));
                 if MessageBoxW(
                     Some(self.window),
                     PCWSTR(prompt.as_ptr()),
@@ -518,8 +532,25 @@ impl App {
             WS_TABSTOP.0,
         )?;
         self.status = self.control(instance, "STATIC", status, 20, 212, 410, 60, 0, 0)?;
+        self.control(
+            instance,
+            "STATIC",
+            &format!("v{} | MIT", env!("CARGO_PKG_VERSION")),
+            20,
+            282,
+            410,
+            20,
+            0,
+            0,
+        )?;
         // Complete every fallible resource lookup before registering input.
-        self.tray.hIcon = LoadIconW(None, IDI_APPLICATION).map_err(|e| e.to_string())?;
+        self.tray.hIcon = application_icon(instance, true)?;
+        SendMessageW(
+            self.window,
+            WM_SETICON,
+            Some(WPARAM(ICON_SMALL as usize)),
+            Some(LPARAM(self.tray.hIcon.0 as isize)),
+        );
         // A background input sink observes press/release events without taking
         // exclusive ownership of a shortcut, hooking input or disabling legacy keys.
         self.input_ready = RegisterRawInputDevices(

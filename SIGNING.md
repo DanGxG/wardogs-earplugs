@@ -1,19 +1,19 @@
-# Trusted Windows code signing
+# Optional Windows code signing
 
-Current status: **pending enrollment**. No trusted certificate or signing account was available when this project was created. Nothing is self-signed, and no unsupported trust claims are made. Version 0.1.0 is publicly available as an explicitly unsigned release; v0.1.1 is prepared for explicitly unsigned public distribution at the maintainer's request. Trusted signing is required before the default automated workflow publishes releases; the maintainer can explicitly publish an unsigned build.
+This guide is for maintainers who choose to configure Windows Authenticode signing for release builds.
 
 ## Free open-source route: SignPath Foundation
 
-Apply through [SignPath Foundation](https://signpath.org/apply). Acceptance requires an existing, maintained open-source release and verifiable reputation, as well as MFA, declared author/reviewer/approver roles and compliance with their [terms](https://signpath.org/terms.html). Approval is discretionary; a new project is not guaranteed immediate acceptance. Identity, account creation and approval must be completed by the maintainer. This repository does not submit an application or accept legal terms on the maintainer's behalf.
+Apply through [SignPath Foundation](https://signpath.org/apply), following its eligibility requirements and [terms](https://signpath.org/terms.html). Configure MFA and declare the actual author, reviewer and approver roles as required by the provider.
 
 After acceptance:
 
 1. Connect the GitHub repository to SignPath, install its required GitHub integration, and configure the project/trusted build policy for the GitHub-hosted workflow.
-2. Create an artifact configuration selecting the EXE inside the uploaded `windows-unsigned` artifact, and a **production** signing policy. Declare the actual authors, reviewers and signing approvers in the README.
+2. Create an artifact configuration selecting the EXE inside the uploaded `windows-build` artifact, and a **production** signing policy. Declare the actual authors, reviewers and signing approvers in the README.
 3. Set repository secret `SIGNPATH_API_TOKEN` and repository variables `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_SIGNING_POLICY_SLUG`, `SIGNPATH_ARTIFACT_CONFIGURATION_SLUG`.
-4. Run **Windows build and release** manually for the desired tag (for example, `v0.1.1`). Approve its signing request in SignPath. The action waits up to one hour, downloads the signed EXE, validates Authenticode, and publishes/replaces the draft release.
+4. Run **Windows build and release** manually for the desired tag (for example, `v0.1.6`). Approve its signing request in SignPath. The action waits up to one hour, downloads the signed EXE, validates Authenticode, and publishes/replaces the draft release.
 
-The action uses uploaded GitHub artifact IDs and GitHub-hosted builds for provenance. See [SignPath's GitHub integration](https://docs.signpath.io/trusted-build-systems/github). Do not enable a test/self-signed policy for public releases: Windows signature verification must report `Valid`.
+The action uses uploaded GitHub artifact IDs and GitHub-hosted builds for provenance. See [SignPath's GitHub integration](https://docs.signpath.io/trusted-build-systems/github). Windows signature verification must report `Valid` for this signing route.
 
 ## Existing trusted certificate or signing service
 
@@ -27,10 +27,12 @@ signtool verify /pa /all /v wardogs-earplugs.exe
 Get-AuthenticodeSignature .\wardogs-earplugs.exe
 ```
 
-After a `Valid` result, package that signed EXE, regenerate SHA-256 checksums, replace the draft assets and publish. Hashes must cover the signed file, and the file must not be modified after signing.
+After a `Valid` result, package the EXE with signature validation:
 
-Microsoft's [Artifact Signing eligibility](https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart) currently covers organizations in the EU, USA, Canada and UK, and individual developers only in the USA/Canada. A Spain-based individual would need another provider, an eligible organization or Foundation acceptance. Paid services require the maintainer's account, identity validation and billing authorization.
+```powershell
+./scripts/package.ps1 -Executable ./wardogs-earplugs.exe -Tag v0.1.6 -RequireSignature
+```
 
-No domain or changes to `danielgrao.me` are needed. A domain can link to the project but cannot provide an Authenticode identity by itself.
+Publish the generated EXE, ZIP and `SHA256SUMS.txt`. The packaging step records the Authenticode requirement in the release manifest for this route. Hashes must cover the final signed file, and the file must not be modified after signing.
 
-Even trusted signatures cannot guarantee no antivirus/SmartScreen warning. [Microsoft explains the reputation behavior](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation).
+Provider enrollment and identity verification are completed through the maintainer's account. Keep private keys and signing secrets outside the repository.

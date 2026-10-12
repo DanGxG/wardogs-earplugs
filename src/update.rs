@@ -80,7 +80,7 @@ impl std::fmt::Display for Version {
 #[derive(Clone, Debug)]
 pub struct Release {
     pub version: Version,
-    pub unsigned: bool,
+    requires_authenticode: bool,
     filename: String,
     hash: [u8; 32],
 }
@@ -102,9 +102,20 @@ fn manifest(text: &[u8]) -> Result<Release> {
         return Err("Release manifest is too large.".into());
     }
     let text = std::str::from_utf8(text).map_err(|e| e.to_string())?;
+    let mut lines = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .peekable();
+    if lines.next() != Some("# earplugs-release-v2") {
+        return Err("Unrecognized release manifest format.".into());
+    }
+    let requires_authenticode = lines.peek() == Some(&"# authenticode-required");
+    if requires_authenticode {
+        lines.next();
+    }
     let mut selected: Option<Release> = None;
     let mut filenames = HashSet::new();
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+    for line in lines {
         let (hash, filename) = line.split_once("  ").ok_or("Invalid SHA-256 manifest.")?;
         let hash = decode_hash(hash)?;
         if !filename.ends_with(".exe") {
@@ -116,29 +127,17 @@ fn manifest(text: &[u8]) -> Result<Release> {
         let name = filename
             .strip_prefix("wardogs-earplugs-v")
             .ok_or("Unexpected release filename.")?;
-        let (version, unsigned) =
-            if let Some(version) = name.strip_suffix("-windows-x64-unsigned.exe") {
-                (version, true)
-            } else {
-                (
-                    name.strip_suffix("-windows-x64.exe")
-                        .ok_or("Unexpected release filename.")?,
-                    false,
-                )
-            };
+        let version = name
+            .strip_suffix("-windows-x64.exe")
+            .ok_or("Unexpected release filename.")?;
         let release = Release {
             version: Version::parse(version)?,
-            unsigned,
+            requires_authenticode,
             filename: filename.into(),
             hash,
         };
-        if let Some(previous) = &selected {
-            if previous.version != release.version {
-                return Err("Ambiguous release manifest.".into());
-            }
-            if !previous.unsigned {
-                continue;
-            }
+        if selected.is_some() {
+            return Err("Ambiguous release manifest.".into());
         }
         selected = Some(release);
     }
@@ -400,7 +399,7 @@ fn validate_exe(path: &Path, release: &Release) -> Result<()> {
     if &pe[..4] != b"PE\0\0" || pe[4..6] != [0x64, 0x86] || pe[24..26] != [0x0b, 0x02] {
         return Err("Update is not a Windows x64 executable.".into());
     }
-    if !release.unsigned {
+    if release.requires_authenticode {
         verify_signature(path)?;
     }
     Ok(())
@@ -436,7 +435,7 @@ fn verify_signature(path: &Path) -> Result<()> {
             (&mut data as *mut WINTRUST_DATA).cast(),
         );
         if status != 0 {
-            return Err("La actualización firmada no tiene una firma Authenticode válida.".into());
+            return Err("La descarga no pasa la verificación Authenticode.".into());
         }
     }
     Ok(())
@@ -1025,9 +1024,9 @@ mod tests {
             }
             Ok(Release {
                 version: Version::parse(env!("CARGO_PKG_VERSION"))?,
-                unsigned: true,
+                requires_authenticode: false,
                 filename: format!(
-                    "wardogs-earplugs-v{}-windows-x64-unsigned.exe",
+                    "wardogs-earplugs-v{}-windows-x64.exe",
                     env!("CARGO_PKG_VERSION")
                 ),
                 hash,
@@ -1156,7 +1155,7 @@ mod tests {
         let hash = file_hash(&files.source).unwrap();
         let release = Release {
             version: Version::parse("0.1.4").unwrap(),
-            unsigned: true,
+            requires_authenticode: false,
             filename: "unused".into(),
             hash,
         };
@@ -1185,16 +1184,22 @@ mod tests {
     #[test]
     fn manifest_selects_expected_exe_and_rejects_ambiguity() {
         let hash = "ab".repeat(32);
-        let unsigned = format!("{hash}  wardogs-earplugs-v0.2.0-windows-x64-unsigned.exe\r\n{hash}  wardogs-earplugs-v0.2.0-windows-x64-unsigned.zip\r\n");
-        let found = manifest(unsigned.as_bytes()).unwrap();
+        let checksum = format!("# earplugs-release-v2\r\n{hash}  wardogs-earplugs-v0.2.0-windows-x64.exe\r\n{hash}  wardogs-earplugs-v0.2.0-windows-x64.zip\r\n");
+        let found = manifest(checksum.as_bytes()).unwrap();
         assert_eq!(found.version, Version::parse("0.2.0").unwrap());
-        assert!(found.unsigned);
-        let signed = format!("{unsigned}{hash}  wardogs-earplugs-v0.2.0-windows-x64.exe\n");
-        assert!(!manifest(signed.as_bytes()).unwrap().unsigned);
+        assert!(!found.requires_authenticode);
+        let signed = checksum.replace(
+            "# earplugs-release-v2\r\n",
+            "# earplugs-release-v2\r\n# authenticode-required\r\n",
+        );
+        assert!(manifest(signed.as_bytes()).unwrap().requires_authenticode);
         for bad in [
-            format!("{unsigned}{unsigned}"),
-            format!("{unsigned}{hash}  wardogs-earplugs-v0.3.0-windows-x64.exe"),
-            format!("{hash}  ../evil.exe"),
+            format!("{checksum}{hash}  wardogs-earplugs-v0.2.0-windows-x64.exe"),
+            format!("{checksum}{hash}  wardogs-earplugs-v0.3.0-windows-x64.exe"),
+            format!("# earplugs-release-v2\n{hash}  ../evil.exe"),
+            checksum.replace("# earplugs-release-v2", "# unknown-format"),
+            checksum.replace("# earplugs-release-v2\r\n", ""),
+            format!("# earplugs-release-v2\n# unknown-policy\n{hash}  wardogs-earplugs-v0.2.0-windows-x64.exe"),
             "broken".into(),
         ] {
             assert!(manifest(bad.as_bytes()).is_err());
@@ -1253,7 +1258,7 @@ mod tests {
                     path: source,
                     release: Release {
                         version: Version::parse("0.1.4").unwrap(),
-                        unsigned: true,
+                        requires_authenticode: false,
                         filename: "test".into(),
                         hash: [0; 32],
                     },
@@ -1294,9 +1299,9 @@ mod tests {
         let mut corrupt = release.clone();
         corrupt.hash[0] ^= 0xff;
         assert!(validate_exe(&staged.path, &corrupt).is_err());
-        if release.unsigned {
+        if !release.requires_authenticode {
             let mut advertised_signed = release.clone();
-            advertised_signed.unsigned = false;
+            advertised_signed.requires_authenticode = true;
             assert!(validate_exe(&staged.path, &advertised_signed).is_err());
         }
         let path = staged.path.clone();

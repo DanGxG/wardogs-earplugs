@@ -99,11 +99,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             gh release create $env:RELEASE_TAG --verify-tag --draft --title $title --notes-file release-notes.txt
             if ($LASTEXITCODE) { throw 'Could not create draft release.' }
+          } elseif (-not $trusted) {
+            $isDraft = gh release view $env:RELEASE_TAG --json isDraft --jq .isDraft
+            if ($LASTEXITCODE -or $isDraft -ne 'true') { throw 'Refusing to replace a published release with unsigned binaries.' }
           }
           $files = @(Get-ChildItem -LiteralPath dist -File | ForEach-Object FullName)
           gh release upload $env:RELEASE_TAG @files --clobber
           if ($LASTEXITCODE) { throw 'Could not upload release assets.' }
           if ($trusted) {
+            $existingAssets = @(gh release view $env:RELEASE_TAG --json assets --jq '.assets[].name')
+            if ($LASTEXITCODE) { throw 'Could not inspect existing release assets.' }
+            foreach ($unsignedAsset in @("wardogs-earplugs-$env:RELEASE_TAG-windows-x64-unsigned.exe", "wardogs-earplugs-$env:RELEASE_TAG-windows-x64-unsigned.zip")) {
+              if ($existingAssets -contains $unsignedAsset) {
+                gh release delete-asset $env:RELEASE_TAG $unsignedAsset --yes
+                if ($LASTEXITCODE) { throw 'Could not remove the superseded unsigned draft asset.' }
+              }
+            }
             gh release edit $env:RELEASE_TAG --title $title --notes-file release-notes.txt --draft=false
             if ($LASTEXITCODE) { throw 'Could not publish signed release.' }
           } else {

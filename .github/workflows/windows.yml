@@ -1,0 +1,112 @@
+name: Windows build and release
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build (for example v0.1.0)'
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+      - name: Check, test and build
+        shell: pwsh
+        run: |
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo build --locked --release
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: upload
+        with:
+          name: windows-unsigned
+          path: target/release/wardogs-earplugs.exe
+          if-no-files-found: error
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: windows-2022
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Validate release tag
+        shell: pwsh
+        env:
+          REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ($env:REQUESTED_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Invalid release tag.' }
+          $version = (Select-String -LiteralPath Cargo.toml -Pattern '^version = "([^"]+)"$').Matches.Groups[1].Value
+          if ($env:REQUESTED_TAG -ne "v$version") { throw 'Tag must match Cargo.toml version.' }
+          "RELEASE_TAG=$env:REQUESTED_TAG" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-unsigned
+          path: unsigned
+      - name: Request trusted signing
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed
+      - name: Package and publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNING_CONFIGURED: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        run: |
+          $trusted = $env:SIGNING_CONFIGURED -eq 'true'
+          if ($trusted) {
+            ./scripts/package.ps1 -Executable signed/wardogs-earplugs.exe -Tag $env:RELEASE_TAG -RequireSignature
+            $title = "WarDogs Earplugs $env:RELEASE_TAG"
+            $notes = "Tiny portable Windows x64 app. F2 toggles only the game's mixer volume to at most the entered percentage (default 40%) and restores it. Native Rust/Win32 UI, system tray, no polling or game process access. This executable has a valid Authenticode signature. New-publisher reputation warnings may still occur."
+          } else {
+            ./scripts/package.ps1 -Executable unsigned/wardogs-earplugs.exe -Tag $env:RELEASE_TAG
+            $title = "WarDogs Earplugs $env:RELEASE_TAG — unsigned draft, signing pending"
+            $notes = "Build is verified by CI but UNSIGNED. Trusted code signing is pending enrollment and identity validation. This draft is for maintainer review; public friend distribution awaits signing. See SIGNING.md in the repository. F2 toggles only matching WarDogs Windows mixer sessions to at most 40% by default, then restores them. Numeric setting, tray background operation, no polling or game process handles."
+          }
+          $notes | Set-Content -LiteralPath release-notes.txt -Encoding utf8
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --verify-tag --draft --title $title --notes-file release-notes.txt
+            if ($LASTEXITCODE) { throw 'Could not create draft release.' }
+          }
+          $files = @(Get-ChildItem -LiteralPath dist -File | ForEach-Object FullName)
+          gh release upload $env:RELEASE_TAG @files --clobber
+          if ($LASTEXITCODE) { throw 'Could not upload release assets.' }
+          if ($trusted) {
+            gh release edit $env:RELEASE_TAG --title $title --notes-file release-notes.txt --draft=false
+            if ($LASTEXITCODE) { throw 'Could not publish signed release.' }
+          } else {
+            gh release edit $env:RELEASE_TAG --title $title --notes-file release-notes.txt --draft=true
+            if ($LASTEXITCODE) { throw 'Could not retain unsigned draft.' }
+          }

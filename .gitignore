@@ -1,0 +1,8 @@
+/target/
+/.tools/
+/dist/
+/test-output/
+*.pfx
+*.p12
+*.key
+*.pem

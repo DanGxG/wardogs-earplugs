@@ -95,6 +95,25 @@ WarDogs remained open at the maintainer's request. These checks send no syntheti
 
 Recovery is held in memory. Turn OFF before closing the game when possible. If the game already ended or its original output disappeared, keep Earplugs running, reopen the game or reconnect that output, then press F2. Normal Exit refuses to discard pending recovery; a crash, forced termination or shutdown can lose it. No background polling or automatic restart monitor was added.
 
+## v0.1.4 startup updates
+
+The app now checks GitHub's latest public checksum manifest once when its primary instance starts, including background startup. It offers a newer stable version through a native Spanish update dialog with No as the default. Declining performs no executable download. Accepted downloads keep the offered version/name/hash fixed, use Windows HTTPS and streaming SHA-256, reject unsupported executable formats, and require Authenticode trust for assets advertised as signed. A hash does not sign an unsigned asset.
+
+The updater adds Windows WinHTTP, BCrypt and WinVerifyTrust APIs, with no new Rust libraries. A temporary Rust worker performs each check/download and finishes afterward; normal Exit cancels and joins it so its staging-file cleanup completes. Windows HTTP/crypto/COM may retain internal threads and caches. The helper validates its actual parent PID and initialized Earplugs window before opening that parent, prepares and verifies the replacement before handoff, waits for the old process, replaces with a backup, and confirms the new UI's PID/readiness before deleting the backup. Recovery restarts the original with a failure notice and helper cleanup.
+
+Passed locally on Windows with the GNU development build:
+
+- Formatting and Clippy with warnings denied; 23 ordinary tests including numeric version ordering, invalid/ambiguous manifest rejection, HTTPS/redirect host restrictions, the known SHA-256 vector, normal-Exit worker cleanup, corrupt payload/preparation rejection, a locked destination, missing-target recovery and rollback after failed initialization.
+- Native Windows HTTPS against the public GitHub release: checksum manifest retrieval, streaming EXE download, digest and x64 validation, mismatch rejection, rejection of an unsigned EXE advertised as signed, and staging cleanup. No GitHub token is used by the app.
+- `scripts/test-updater.ps1` tests a simulated newer offer in the test-only UI harness against a real compiled app. No keeps the old EXE with no staging; a bad hash shows the checksum error and preserves the old EXE; Yes replaces and restarts into the real new app, preserving saved 55%/filter settings and window mode, then removes helper/backup files. Test injection is compiled only into the test harness and is absent from the production EXE. Controls are targeted by owned PID, with no keyboard injection or game interaction.
+- Release mixer/UI checks with `EARPLUGS_TEST_NO_INPUT=1`, isolated settings/tray/single-instance/corrupt-startup smoke checks, and normal Exit remained green.
+
+Representative GNU sample after the startup network check: EXE 459,264 bytes; resident working set 15,486,976 bytes; private memory 3,551,232 bytes; 0 ms CPU recorded over 15 idle seconds; 10 OS-observed threads. These are samples, not limits; native Windows networking increases the resident Windows code/caches compared with v0.1.3.
+
+Not exercised end to end: a valid signed update, an actual newer public release offer, interruption during replacement, restricted-folder ACL variants, or audio-restoration failure within the updater UI. Signed rejection, replacement fault/rollback behavior and core audio partial-recovery behavior were tested separately. The entire live global F2/modifier matrix remains unverified because the maintainer kept WarDogs open. Crash/forced termination/power loss can interrupt file cleanup or installation and cannot guarantee recovery.
+
+Versions up to v0.1.3 have no startup updater: v0.1.4 must be downloaded manually once. The feature requires write access to the EXE folder and never requests administrator access.
+
 ## Not verified / external prerequisites
 
 - Real WarDogs executable name, game-specific audio routing, exclusive fullscreen hotkey delivery/overlay visibility and vendor anti-cheat acceptance: not tested with the actual game. Exclusive fullscreen may cover the independent desktop badge. The default `wardogs` filename filter is editable.

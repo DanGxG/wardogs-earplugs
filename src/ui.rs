@@ -2,7 +2,7 @@ use crate::{
     audio::Audio,
     model::{F2Press, Settings},
     overlay::Overlay,
-    settings,
+    settings, update,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -63,6 +63,7 @@ struct App {
     input_ready: bool,
     session_notifications: bool,
     quit_requested: bool,
+    updater: Option<update::Updater>,
 }
 
 struct WindowState {
@@ -82,6 +83,7 @@ enum Action {
     Menu,
     RecreateTray,
     EndSession,
+    Update,
 }
 
 impl WindowState {
@@ -130,6 +132,7 @@ impl WindowState {
                 Action::Hide => app.hide(),
                 Action::Exit => app.exit(),
                 Action::Show => show_window(app.window),
+                Action::Update => app.update(),
                 Action::Menu => app.menu(),
                 Action::RecreateTray => {
                     app.tray_ready = Shell_NotifyIconW(NIM_ADD, &app.tray).as_bool();
@@ -270,6 +273,7 @@ pub fn run() -> Result<(), String> {
                 input_ready: false,
                 session_notifications: false,
                 quit_requested: false,
+                updater: None,
             }),
             pending: RefCell::new(VecDeque::new()),
             f2_press: RefCell::new(F2Press::default()),
@@ -294,6 +298,7 @@ pub fn run() -> Result<(), String> {
         {
             show_window(window);
         }
+        state.app.get_mut().updater = update::Updater::start(window).ok();
         let mut message = MSG::default();
         let result = loop {
             let received = GetMessageW(&mut message, None, 0, 0).0;
@@ -339,6 +344,66 @@ unsafe fn show_window(window: HWND) {
 }
 
 impl App {
+    unsafe fn update(&mut self) {
+        let event = self.updater.as_mut().and_then(update::Updater::receive);
+        match event {
+            Some(update::Event::Checked(Ok(Some(release)))) => {
+                let unsigned = if release.unsigned {
+                    "\n\nEsta versión no está firmada digitalmente."
+                } else {
+                    ""
+                };
+                let prompt = wide(&format!("Hay una nueva versión de WarDogs Earplugs: {} (actual: {}).\n\n¿Quieres descargarla e instalarla ahora? La aplicación se reiniciará y conservará tus ajustes.{unsigned}", release.version, env!("CARGO_PKG_VERSION")));
+                if MessageBoxW(
+                    Some(self.window),
+                    PCWSTR(prompt.as_ptr()),
+                    w!("Actualización disponible"),
+                    MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2,
+                ) == IDYES
+                {
+                    self.set_status("Descargando actualización de GitHub...");
+                    if let Some(updater) = &mut self.updater {
+                        if let Err(error) = updater.download(release) {
+                            self.update_error(&error);
+                        }
+                    }
+                }
+            }
+            Some(update::Event::Downloaded(Ok(mut staged))) => {
+                let restored = self.audio.restore();
+                self.overlay.set_on(self.audio.is_lowered());
+                if let Err(error) = restored {
+                    self.update_error(&format!(
+                        "Antes de actualizar, restaura el volumen con F2. {error}"
+                    ));
+                    return;
+                }
+                match staged.handoff(!IsWindowVisible(self.window).as_bool()) {
+                    Ok(()) => {
+                        self.quit_requested = true;
+                        PostQuitMessage(0);
+                    }
+                    Err(error) => self.update_error(&error),
+                }
+            }
+            Some(update::Event::Downloaded(Err(error))) => self.update_error(&error),
+            Some(update::Event::Notice(notice)) => self.update_error(&notice),
+            // Offline, missing releases and an up-to-date copy remain unobtrusive.
+            Some(update::Event::Checked(_)) | None => (),
+        }
+    }
+
+    unsafe fn update_error(&self, error: &str) {
+        self.set_status(error);
+        let text = wide(error);
+        MessageBoxW(
+            Some(self.window),
+            PCWSTR(text.as_ptr()),
+            w!("No se pudo actualizar"),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+
     unsafe fn initialize(&mut self, instance: HINSTANCE, status: &str) -> Result<(), String> {
         self.control(
             instance,
@@ -705,7 +770,9 @@ unsafe fn dispatch_message(
         return DefWindowProcW(window, message, wparam, lparam);
     }
     // Queue actions independently of App, including during menus and COM callbacks.
-    let action = if message == state.taskbar_created && state.taskbar_created != 0 {
+    let action = if message == update::MESSAGE {
+        Some(Action::Update)
+    } else if message == state.taskbar_created && state.taskbar_created != 0 {
         Some(Action::RecreateTray)
     } else {
         match message {

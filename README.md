@@ -5,7 +5,7 @@ A tiny native Windows tray app written in Rust. **F2 sets only WarDogs' Windows 
 ## Use
 
 1. Download the Windows x64 release EXE, or unzip the portable package. Requires Windows 10/11 x64. No Python, installer or administrator access is needed.
-   When updating, **Exit the old version first**; launching a new copy while the old one is running reopens the old instance.
+   For a manual update, **Exit the old version first**; launching a new copy while the old one is running reopens the old instance. Versions up to v0.1.3 cannot update themselves: install v0.1.4 manually once to get the startup update check.
 2. Run `wardogs-earplugs.exe` and start WarDogs so it creates a Windows audio session.
 3. Enter a whole **Game mixer volume (%)** from **0 to 100**. Default is **40**. This is an exact target mixer percentage, not a relative reduction or a ceiling: choosing 60 sets matching sessions to 60%, even if they were quieter.
 4. Leave **Game executable contains** at `wardogs`, or enter the actual name shown in Task Manager's **Details** tab. Matching ignores letter case. A complete name ending in `.exe` matches exactly; otherwise it matches that distinctive part of the filename. Click **Apply**. While earplugs are on, Apply updates the current sessions immediately, including changes from 40% to 60% or 80%, while keeping their original levels for restoration. It can refresh a restarted game's matching sessions; if restoration is already partly complete, finish recovery with F2 before applying again.
@@ -20,10 +20,18 @@ F2 and modifier+F2 combinations are still delivered normally to the game and oth
 
 The badge is a small, independent Windows window at the top-left of the primary screen. It stays above ordinary desktop and borderless/windowed game windows, lets clicks pass through, and does not take keyboard focus. It has no owner or attachment to the game window. Exclusive fullscreen may cover it. It appears only while earplugs are on and uses no timer or polling loop.
 
+## Updates
+
+Version 0.1.4 checks GitHub's latest public `SHA256SUMS.txt` once at startup, including `--background`. A newer stable `major.minor.patch` version opens a Spanish **Sí / No** prompt with **No** selected by default. **No** keeps the current version and downloads no EXE. Offline checks, unavailable releases and an up-to-date copy stay silent. There is no periodic check or installed service.
+
+**Sí** downloads the offered version using the asset name and SHA-256 hash captured during the check. Native Windows HTTPS and streaming hashing verify the download against that manifest and check the Windows x64 executable format. Assets advertised as signed also require Windows Authenticode trust validation; unsigned assets remain unsigned. A matching hash proves agreement with the release manifest, not a trusted publisher signature.
+
+Before replacement, Earplugs restores the game volume. Failed recovery or handoff cancels the update and keeps the current app open. A temporary helper waits for its Earplugs parent to exit, backs up the old EXE, replaces it at the same path and restarts with the same settings and current tray/window mode. It removes the backup only after the new app's UI reports readiness; a failed startup restores the previous EXE. Updating requires write permission to the EXE folder and does not request administrator access. If that folder is protected, update manually from a writable location.
+
 ## Small by design
 
-- One thread, native Win32 controls, native tray icon and a blocking Windows message loop.
-- No polling, timers, worker threads, embedded browser, Python interpreter, telemetry, updates or network traffic.
+- One UI thread, native Win32 controls, native tray icon and a blocking Windows message loop. Update checks/downloads use temporary workers; accepted updates use a temporary helper process.
+- No periodic polling, timer-based monitors, persistent worker threads, embedded browser, Python interpreter or telemetry. Only startup update checks and accepted downloads use the network.
 - The keyboard listener wakes on Windows keyboard events, reads a fixed stack buffer and ignores non-F2 keys. It records no keyboard events or typed text.
 - Audio/process enumeration happens only when a volume change or restoration needs it. Live sessions use saved Windows audio interfaces; recovery of ended sessions searches their original output endpoint. There is no restart monitor.
 - Ordinary unchanged F2 presses perform no settings-file writes.
@@ -37,9 +45,11 @@ Memory and CPU depend on Windows, audio drivers and tray/UI state. See [VALIDATI
 
 Earplugs uses Windows Raw Input with `RegisterRawInputDevices` and `RIDEV_INPUTSINK`, a process-list snapshot containing filenames/PIDs, Core Audio mixer sessions and an independent native desktop badge. It does not open the game's process, read/write its memory, inject code, load a game plugin, hook input or the game window, intercept graphics or install a driver. The process snapshot is used solely to associate the named game's PIDs with its Windows audio sessions. It checks all active output devices, including games routed to a different output.
 
+The updater uses Windows WinHTTP, BCrypt and WinVerifyTrust without new Rust libraries. Its process handles target only its own Earplugs parent/helper for replacement and readiness, never the game.
+
 Anti-cheat classification belongs to the game's vendor; this implementation cannot promise approval or that a future policy will accept a background keyboard utility.
 
-Version 0.1.3 includes the device-state, startup and recovery behavior described here. Completed checks and remaining limits are recorded in [VALIDATION.md](VALIDATION.md). The full live keyboard matrix remains unverified.
+Version 0.1.4 retains the device-state, startup and recovery behavior described here. Completed checks and remaining limits are recorded in [VALIDATION.md](VALIDATION.md). The full live keyboard matrix remains unverified.
 
 Actions received during a tray menu or a nested Core Audio call are queued and processed after the current handler releases application state. Close and Exit cancel an open menu so the request can proceed; a nested close keeps its normal hide-to-tray behavior. Startup and shutdown use shared resource cleanup.
 
@@ -55,13 +65,13 @@ To uninstall, Exit, delete the EXE and remove any startup shortcut you created. 
 
 ## Code signing policy
 
-**Trusted code signing is pending service enrollment/identity validation.** Version 0.1.0 is publicly available as an explicitly unsigned EXE, and v0.1.3 is prepared for explicitly unsigned public distribution at the maintainer's request. The automated workflow keeps unsigned builds in drafts unless the maintainer chooses to publish them. Do not treat a checksum or a self-signed certificate as a trusted Authenticode signature.
+**Trusted code signing is pending service enrollment/identity validation.** Version 0.1.4 is prepared for explicitly unsigned public distribution at the maintainer's request. The update prompt identifies unsigned downloads. The automated workflow keeps unsigned builds in drafts unless the maintainer chooses to publish them. Do not treat a checksum or a self-signed certificate as a trusted Authenticode signature.
 
 The project includes a GitHub-hosted build and a SignPath signing stage. It publishes a signed release only after the returned EXE passes Windows Authenticode validation. See [SIGNING.md](SIGNING.md) for setup and certificate alternatives. The maintainer is [Daniel Grao / DanGxG](https://github.com/DanGxG). No signing provider is claimed to endorse or sign this project before acceptance.
 
 Signed applications can still receive SmartScreen or antivirus reputation warnings, especially for a new publisher. Signing identifies the publisher and protects file integrity; it does not guarantee zero warnings. See [Microsoft's SmartScreen guidance](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation).
 
-**Privacy:** the application never transfers user information to a network service. It stores only the chosen percentage and executable-name filter locally. Its source and build workflows are public.
+**Privacy:** update checks and accepted downloads connect to GitHub and its public download CDN over HTTPS. Those services receive ordinary HTTP request metadata; Earplugs sends no game data, keyboard events, typed text or saved configuration and has no telemetry. Preferences remain local. Its source and build workflows are public.
 
 ## Build and test
 
@@ -89,6 +99,22 @@ Opt-in real-device tests for ended-session recovery and duplicate-instance exclu
 cargo test --locked expired_session_restores_persisted_volume -- --ignored --nocapture
 cargo test --locked restored_instance_is_not_reused_for_another_session -- --ignored --nocapture
 ```
+
+Opt-in network validation downloads the public GitHub manifest and its selected EXE, verifies it and deletes the staged file without installing or executing it:
+
+```powershell
+cargo test --locked update::tests::real_github_manifest_and_verified_download -- --ignored --nocapture
+```
+
+The download check does not exercise installation or rollback. To exercise declining an update, rejecting an incorrect checksum, and replacing the portable EXE while preserving settings and window mode, close Earplugs and run the isolated UI harness:
+
+```powershell
+cargo test --locked --no-run
+$testHarness = (Get-ChildItem ./target/debug/deps/wardogs_earplugs-*.exe | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+./scripts/test-updater.ps1 -TestHarness $testHarness -NewExecutable ./target/release/wardogs-earplugs.exe
+```
+
+The test uses a local candidate, private settings and temporary folders with spaces. It sends commands only to its own UI processes and does not inject keyboard input or inspect the game. Local update overrides exist only in the test harness; the replacement production EXE performs its normal startup update check. [VALIDATION.md](VALIDATION.md) records executed checks and their limits.
 
 To test real F2 delivery and restore-on-exit against a particular compiled EXE, close Earplugs first and set `$env:EARPLUGS_TEST_EXE` to that EXE's absolute path before running the mixer test. The normal test injects keyboard input through Windows and needs a quiet desktop with other games closed so its harmless keyboard fixture keeps focus.
 

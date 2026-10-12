@@ -1,4 +1,9 @@
-use crate::{audio::Audio, model::Settings, overlay::Overlay, settings};
+use crate::{
+    audio::Audio,
+    model::{F2Press, Settings},
+    overlay::Overlay,
+    settings,
+};
 use std::{
     cell::{Cell, RefCell},
     path::PathBuf,
@@ -18,7 +23,11 @@ use windows::{
         },
         UI::{
             Controls::EM_SETLIMITTEXT,
-            Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, VK_F2},
+            Input::{
+                GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE,
+                RAWINPUTHEADER, RAWKEYBOARD, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT,
+                RIM_TYPEKEYBOARD,
+            },
             Shell::{
                 Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
                 NOTIFYICONDATAW,
@@ -29,7 +38,6 @@ use windows::{
 };
 
 const CLASS: PCWSTR = w!("WarDogsEarplugsWindow");
-const HOTKEY: i32 = 1;
 const TRAY_MESSAGE: u32 = WM_APP + 1;
 const ID_SAVE: usize = 101;
 const ID_TOGGLE: usize = 102;
@@ -50,7 +58,7 @@ struct App {
     overlay: Overlay,
     tray: NOTIFYICONDATAW,
     tray_ready: bool,
-    hotkey_ready: bool,
+    input_ready: bool,
     taskbar_created: u32,
     quit_requested: bool,
 }
@@ -58,6 +66,7 @@ struct App {
 struct WindowState {
     app: RefCell<App>,
     pending_toggles: Cell<usize>,
+    f2_press: Cell<F2Press>,
 }
 
 impl WindowState {
@@ -178,11 +187,12 @@ pub fn run() -> Result<(), String> {
                 overlay,
                 tray: NOTIFYICONDATAW::default(),
                 tray_ready: false,
-                hotkey_ready: false,
+                input_ready: false,
                 taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
                 quit_requested: false,
             }),
             pending_toggles: Cell::new(0),
+            f2_press: Cell::new(F2Press::default()),
         });
         if let Err(error) = state.app.get_mut().initialize(instance, &initial_status) {
             let _ = DestroyWindow(window);
@@ -194,7 +204,7 @@ pub fn run() -> Result<(), String> {
             (&*state as *const WindowState) as isize,
         );
         let background = std::env::args_os().skip(1).any(|arg| arg == "--background");
-        if !background || !state.app.borrow().tray_ready || !state.app.borrow().hotkey_ready {
+        if !background || !state.app.borrow().tray_ready || !state.app.borrow().input_ready {
             show_window(window);
         }
         let mut message = MSG::default();
@@ -217,8 +227,16 @@ pub fn run() -> Result<(), String> {
         if state.app.get_mut().tray_ready {
             let _ = Shell_NotifyIconW(NIM_DELETE, &state.app.get_mut().tray);
         }
-        if state.app.get_mut().hotkey_ready {
-            let _ = UnregisterHotKey(Some(window), HOTKEY);
+        if state.app.get_mut().input_ready {
+            let _ = RegisterRawInputDevices(
+                &[RAWINPUTDEVICE {
+                    usUsagePage: 1,
+                    usUsage: 6,
+                    dwFlags: RIDEV_REMOVE,
+                    hwndTarget: HWND::default(),
+                }],
+                std::mem::size_of::<RAWINPUTDEVICE>() as u32,
+            );
         }
         let _ = DestroyWindow(window);
         result
@@ -345,8 +363,18 @@ impl App {
             WS_TABSTOP.0,
         )?;
         self.status = self.control(instance, "STATIC", status, 20, 212, 410, 60, 0, 0)?;
-        self.hotkey_ready =
-            RegisterHotKey(Some(self.window), HOTKEY, MOD_NOREPEAT, VK_F2.0 as u32).is_ok();
+        // A background input sink observes press/release events without taking
+        // exclusive ownership of a shortcut, hooking input or disabling legacy keys.
+        self.input_ready = RegisterRawInputDevices(
+            &[RAWINPUTDEVICE {
+                usUsagePage: 1,
+                usUsage: 6,
+                dwFlags: RIDEV_INPUTSINK,
+                hwndTarget: self.window,
+            }],
+            std::mem::size_of::<RAWINPUTDEVICE>() as u32,
+        )
+        .is_ok();
         self.tray.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
         self.tray.hWnd = self.window;
         self.tray.uID = 1;
@@ -356,8 +384,8 @@ impl App {
         let tip = wide("WarDogs Earplugs | F2 lower / restore");
         self.tray.szTip[..tip.len()].copy_from_slice(&tip);
         self.tray_ready = Shell_NotifyIconW(NIM_ADD, &self.tray).as_bool();
-        if !self.hotkey_ready {
-            self.set_status("F2 is already in use. Close the conflicting app, then restart Earplugs. The Toggle button still works.");
+        if !self.input_ready {
+            self.set_status("Windows keyboard input registration failed. Restart Earplugs. The Toggle button still works.");
         } else if !self.tray_ready {
             self.set_status(
                 "Windows could not create the tray icon. Keep this window open; F2 still works.",
@@ -537,6 +565,20 @@ unsafe fn dispatch_message(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if message == WM_INPUT {
+        if let Some((key, down)) = keyboard_event(lparam) {
+            let mut press = state.f2_press.get();
+            let toggle = press.event(key, down);
+            state.f2_press.set(press);
+            if toggle {
+                state
+                    .pending_toggles
+                    .set(state.pending_toggles.get().saturating_add(1));
+            }
+        }
+        // Foreground raw-input messages require Windows' default cleanup.
+        return DefWindowProcW(window, message, wparam, lparam);
+    }
     // Windows may dispatch nested control notifications. Never alias mutable state.
     if let Ok(mut app) = state.app.try_borrow_mut() {
         if message == app.taskbar_created && app.taskbar_created != 0 {
@@ -547,10 +589,6 @@ unsafe fn dispatch_message(
             return LRESULT(0);
         }
         match message {
-            WM_HOTKEY if wparam.0 == HOTKEY as usize => {
-                app.toggle();
-                return LRESULT(0);
-            }
             WM_COMMAND if (wparam.0 >> 16) == BN_CLICKED as usize => {
                 match wparam.0 & 0xffff {
                     ID_SAVE => match app.save(true) {
@@ -588,11 +626,27 @@ unsafe fn dispatch_message(
             }
             _ => (),
         }
-    } else if message == WM_HOTKEY && wparam.0 == HOTKEY as usize {
-        state
-            .pending_toggles
-            .set(state.pending_toggles.get().saturating_add(1));
-        return LRESULT(0);
     }
     DefWindowProcW(window, message, wparam, lparam)
+}
+
+unsafe fn keyboard_event(handle: LPARAM) -> Option<(u16, bool)> {
+    let mut input = RAWINPUT::default();
+    let mut size = std::mem::size_of::<RAWINPUT>() as u32;
+    let read = GetRawInputData(
+        HRAWINPUT(handle.0 as *mut _),
+        RID_INPUT,
+        Some((&mut input as *mut RAWINPUT).cast()),
+        &mut size,
+        std::mem::size_of::<RAWINPUTHEADER>() as u32,
+    );
+    if read == u32::MAX
+        || read
+            < (std::mem::size_of::<RAWINPUTHEADER>() + std::mem::size_of::<RAWKEYBOARD>()) as u32
+        || input.header.dwType != RIM_TYPEKEYBOARD.0
+    {
+        return None;
+    }
+    let keyboard = input.data.keyboard;
+    Some((keyboard.VKey, keyboard.Flags & 1 == 0))
 }

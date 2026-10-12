@@ -55,9 +55,25 @@ Representative MSVC v0.1.1 measurements on this computer:
 
 Repeated live synthetic-key testing had an intermittent delivery failure (`Real F2 did not set expected mixer volume 0.4; actual=0.8, overlay_on=false`). Other native F2 runs and deterministic dispatched-hotkey tests passed. Synthetic input shares the desktop's keyboard state; these results do not verify every desktop/input context or the actual game's fullscreen behavior.
 
+## v0.1.2 checks
+
+The previous release was reproduced failing on real input with Shift+W held: `F2 with held keys [a0, 57] failed; expected=0.4, actual=0.8`. `RegisterHotKey` matches modifiers exactly. Registering additional modifier variants also failed the held-F2 case when a modifier changed: `Held F2 repeated while adding modifier a0`.
+
+The final implementation uses Windows Raw Input keyboard events in background input-sink mode, with a press/release latch. It does not reserve shortcuts, suppress key delivery, install a keyboard hook, or poll. Non-F2 events are discarded without logging or storage. Windows/game F2 bindings continue to receive the key normally.
+
+Passed locally:
+
+- Formatting, Clippy with warnings denied, six unit/filesystem tests and release compilation. The new input-state regression covers movement and modifier changes during a held F2, repeated key-down events, release, and a fresh press; exactly two fresh presses are accepted.
+- Actual Shift+W/F2 mixer transitions passed during initial live raw-input runs. The complete multi-key matrix did **not** pass: WarDogs reclaimed focus from the isolated keyboard fixture (`Focus changed for held keys [57, 41]`). The maintainer requested keeping the game open, so remaining checks disable synthetic keyboard input rather than sending gameplay/shortcut keys to an uncontrolled window.
+- `EARPLUGS_TEST_NO_INPUT=1` real Windows mixer and release UI checks passed: exact 40/60/80/0/100% targets, restoration, manual-change preservation, missing-game handling, Apply while active, badge state/placement/independence, and restore on Exit. This mode uses the Toggle button and does not verify global keyboard delivery or tray-menu input deferral.
+- Isolated smoke checks passed: numeric validation, persistence, missing-game response, close-to-tray, single-instance handling and Exit. GNU build sample: working set 10,031,104 bytes; private memory 1,990,656 bytes; 15.625 ms CPU recorded over 15 seconds while the game remained running.
+- Local release imports include `RegisterRawInputDevices` and `GetRawInputData`; no imported game-process memory APIs, low-level keyboard hook, input injection or polling timer.
+
+The full live modifier matrix and held-key Windows delivery remain unverified until a desktop is available without competing game focus/input. Unit input-state tests are not a substitute for those live checks.
+
 ## Not verified / external prerequisites
 
 - Real WarDogs executable name, game-specific audio routing, exclusive fullscreen hotkey delivery/overlay visibility and vendor anti-cheat acceptance: not tested with the actual game. Exclusive fullscreen may cover the independent desktop badge. The default `wardogs` filename filter is editable.
-- Trusted Authenticode signing: pending an approved provider/account and identity validation. Version 0.1.0 was explicitly published as an unsigned release by maintainer request; v0.1.1 is prepared for the same explicitly unsigned distribution. Neither is claimed to have a trusted Authenticode signature.
+- Trusted Authenticode signing: pending an approved provider/account and identity validation. Releases are explicitly unsigned by maintainer request; no release is claimed to have a trusted Authenticode signature.
 - Zero SmartScreen/antivirus warnings on friends' PCs: cannot be guaranteed by signing or by the local scan.
 - Hard crashes/power failures cannot guarantee volume restoration. Settings replacement is atomic under normal same-volume filesystem operation; Windows audio sessions are not an ACID database.

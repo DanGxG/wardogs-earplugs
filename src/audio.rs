@@ -333,6 +333,30 @@ mod tests {
             unsafe { FindWindowW(w!("WarDogsEarplugsWindow"), None) }.is_err(),
             "Close the running Earplugs app before the release hotkey test."
         );
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT,
+        };
+        let no_input = std::env::var_os("EARPLUGS_TEST_NO_INPUT").is_some();
+        let mut available = if no_input { u16::MAX } else { 0 };
+        for modifiers in if no_input { 0..0 } else { 0..16 } {
+            if unsafe {
+                RegisterHotKey(
+                    None,
+                    1000 + modifiers as i32,
+                    HOT_KEY_MODIFIERS(modifiers) | MOD_NOREPEAT,
+                    VK_F2.0 as u32,
+                )
+            }
+            .is_ok()
+            {
+                available |= 1 << modifiers;
+                unsafe {
+                    UnregisterHotKey(None, 1000 + modifiers as i32).unwrap();
+                }
+            } else {
+                println!("Desktop already owns F2 modifier mask {modifiers}; skipping that shortcut to avoid launching an unrelated app during this test.");
+            }
+        }
         let profile = std::env::temp_dir().join(format!("earplugs-ui-test-{}", std::process::id()));
         let configuration = profile.join("WarDogsEarplugs").join("settings.txt");
         crate::settings::save(&configuration, settings).unwrap();
@@ -396,6 +420,11 @@ mod tests {
             unsafe {
                 volume.SetMasterVolume(0.8, std::ptr::null()).unwrap();
             }
+            if no_input {
+                println!("Keyboard injection disabled by EARPLUGS_TEST_NO_INPUT; testing release controls, mixer and overlay only.");
+            } else {
+                verify_held_keys(volume, window, overlay, available);
+            }
             let key_down = INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: INPUT_0 {
@@ -422,13 +451,21 @@ mod tests {
                         windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(key)
                     })
                 });
-                assert_eq!(
-                    unsafe { SendInput(&[key_down, key_up], size_of::<INPUT>() as i32) },
-                    2,
-                    "Windows did not accept the test F2 input"
-                );
+                if no_input {
+                    unsafe {
+                        SendMessageW(window, WM_COMMAND, Some(WPARAM(102)), None);
+                    }
+                } else {
+                    assert_eq!(
+                        unsafe { SendInput(&[key_down, key_up], size_of::<INPUT>() as i32) },
+                        2,
+                        "Windows did not accept the test F2 input"
+                    );
+                }
                 let changed = (0..30).any(|_| {
-                    if unchanged(unsafe { volume.GetMasterVolume().unwrap() }, expected) {
+                    if unchanged(unsafe { volume.GetMasterVolume().unwrap() }, expected)
+                        && unsafe { IsWindowVisible(overlay) }.as_bool() == (expected == 0.4)
+                    {
                         true
                     } else {
                         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -532,46 +569,55 @@ mod tests {
                 "New 60% target was incorrectly capped by the old 40% mixer level"
             );
             assert!(unsafe { IsWindowVisible(overlay) }.as_bool());
-            // Tray menus run a nested Windows message loop. A delivered F2 must not be lost.
-            unsafe {
-                PostMessageW(
-                    Some(window),
-                    windows::Win32::UI::WindowsAndMessaging::WM_APP + 1,
-                    WPARAM(0),
-                    LPARAM(windows::Win32::UI::WindowsAndMessaging::WM_RBUTTONUP as isize),
-                )
-                .unwrap();
-            }
-            let menu_open = (0..30).any(|_| {
-                if let Ok(menu) = unsafe { FindWindowW(w!("#32768"), None) } {
-                    let mut menu_pid = 0;
-                    unsafe {
-                        GetWindowThreadProcessId(menu, Some(&mut menu_pid));
-                    }
-                    if menu_pid == app.id() && unsafe { IsWindowVisible(menu) }.as_bool() {
-                        return true;
-                    }
+            // Tray menus run a nested Windows message loop. Input received while
+            // App is borrowed must be deferred and then applied after dismissal.
+            if !no_input {
+                unsafe {
+                    PostMessageW(
+                        Some(window),
+                        windows::Win32::UI::WindowsAndMessaging::WM_APP + 1,
+                        WPARAM(0),
+                        LPARAM(windows::Win32::UI::WindowsAndMessaging::WM_RBUTTONUP as isize),
+                    )
+                    .unwrap();
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                false
-            });
-            assert!(
-                menu_open,
-                "Tray popup did not open for reentrant hotkey regression"
-            );
-            unsafe {
-                SendMessageW(
-                    window,
-                    windows::Win32::UI::WindowsAndMessaging::WM_HOTKEY,
-                    Some(WPARAM(1)),
-                    None,
+                let menu_open = (0..30).any(|_| {
+                    if let Ok(menu) = unsafe { FindWindowW(w!("#32768"), None) } {
+                        let mut menu_pid = 0;
+                        unsafe {
+                            GetWindowThreadProcessId(menu, Some(&mut menu_pid));
+                        }
+                        if menu_pid == app.id() && unsafe { IsWindowVisible(menu) }.as_bool() {
+                            return true;
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    false
+                });
+                assert!(
+                    menu_open,
+                    "Tray popup did not open for reentrant hotkey regression"
                 );
-                SendMessageW(
-                    window,
-                    windows::Win32::UI::WindowsAndMessaging::WM_CANCELMODE,
-                    None,
-                    None,
+                unsafe {
+                    assert_eq!(SendInput(&[key_down, key_up], size_of::<INPUT>() as i32), 2);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                assert!(
+                    unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.6),
+                    "Input was not deferred during the tray menu"
                 );
+                unsafe {
+                    SendMessageW(
+                        window,
+                        windows::Win32::UI::WindowsAndMessaging::WM_CANCELMODE,
+                        None,
+                        None,
+                    );
+                }
+            } else {
+                unsafe {
+                    SendMessageW(window, WM_COMMAND, Some(WPARAM(102)), None);
+                }
             }
             let restored = (0..30).any(|_| {
                 if unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.4) {
@@ -622,5 +668,287 @@ mod tests {
         let _ = std::fs::remove_dir(configuration.parent().unwrap());
         let _ = std::fs::remove_dir(profile);
         result.unwrap();
+    }
+
+    fn verify_held_keys(
+        volume: &ISimpleAudioVolume,
+        window: windows::Win32::Foundation::HWND,
+        overlay: windows::Win32::Foundation::HWND,
+        available: u16,
+    ) {
+        use windows::Win32::{
+            Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+            System::Threading::GetCurrentThreadId,
+            UI::{
+                Input::KeyboardAndMouse::{
+                    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+                    VIRTUAL_KEY,
+                },
+                WindowsAndMessaging::*,
+            },
+        };
+        fn keys(keys: &[u16], up: bool) {
+            let inputs: Vec<INPUT> = keys
+                .iter()
+                .map(|key| INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VIRTUAL_KEY(*key),
+                            dwFlags: if up {
+                                KEYEVENTF_KEYUP
+                            } else {
+                                Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    },
+                })
+                .collect();
+            assert_eq!(
+                unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) } as usize,
+                inputs.len(),
+                "Windows rejected held-key test input"
+            );
+        }
+        struct HeldKeys(Vec<u16>);
+        impl Drop for HeldKeys {
+            fn drop(&mut self) {
+                keys(&self.0, true);
+            }
+        }
+        // Consume test movement/modifier input in a harmless native window.
+        unsafe extern "system" fn fixture_proc(
+            window: HWND,
+            message: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            DefWindowProcW(window, message, wparam, lparam)
+        }
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        let thread = std::thread::spawn(move || unsafe {
+            let class = windows::core::w!("EarplugsKeyboardFixture");
+            assert_ne!(
+                RegisterClassW(&WNDCLASSW {
+                    lpfnWndProc: Some(fixture_proc),
+                    lpszClassName: class,
+                    ..Default::default()
+                }),
+                0
+            );
+            let fixture = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                class,
+                windows::core::w!("Earplugs keyboard test"),
+                WS_POPUP | WS_VISIBLE | WS_CAPTION,
+                100,
+                100,
+                260,
+                40,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            send.send((fixture.0 as usize, GetCurrentThreadId()))
+                .unwrap();
+            let mut message = MSG::default();
+            while GetMessageW(&mut message, None, 0, 0).0 > 0 {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            let _ = DestroyWindow(fixture);
+            let _ = UnregisterClassW(class, None);
+        });
+        let (fixture, thread_id) = receive.recv().unwrap();
+        let fixture = HWND(fixture as *mut _);
+        struct Fixture(u32, Option<std::thread::JoinHandle<()>>, HWND);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = PostThreadMessageW(self.0, WM_QUIT, WPARAM(0), LPARAM(0));
+                }
+                self.1.take().unwrap().join().unwrap();
+                unsafe {
+                    let _ = SetForegroundWindow(self.2);
+                }
+            }
+        }
+        let _fixture = Fixture(thread_id, Some(thread), unsafe { GetForegroundWindow() });
+        // Test-only input-queue attachment gives the fixture foreground focus;
+        // modifier/letter combinations must never be sent to the user's app.
+        let foreground_thread = unsafe { GetWindowThreadProcessId(GetForegroundWindow(), None) };
+        let current_thread = unsafe { GetCurrentThreadId() };
+        let mut message = MSG::default();
+        unsafe {
+            let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
+        }
+        let attached = unsafe {
+            windows::Win32::System::Threading::AttachThreadInput(
+                current_thread,
+                foreground_thread,
+                true,
+            )
+        }
+        .as_bool();
+        let fixture_attached = unsafe {
+            windows::Win32::System::Threading::AttachThreadInput(current_thread, thread_id, true)
+        }
+        .as_bool();
+        unsafe {
+            let _ = BringWindowToTop(fixture);
+            let _ = SetForegroundWindow(fixture);
+        }
+        let focused = unsafe { GetForegroundWindow() } == fixture;
+        if fixture_attached {
+            unsafe {
+                let _ = windows::Win32::System::Threading::AttachThreadInput(
+                    current_thread,
+                    thread_id,
+                    false,
+                );
+            }
+        }
+        if attached {
+            unsafe {
+                let _ = windows::Win32::System::Threading::AttachThreadInput(
+                    current_thread,
+                    foreground_thread,
+                    false,
+                );
+            }
+        }
+        assert!(focused, "Could not focus safe keyboard fixture: foreground_thread={foreground_thread}, current_thread={current_thread}, attached={attached}, fixture_attached={fixture_attached}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // The first case deterministically reproduces bare-F2-only registration.
+        // Skip only desktop-owned shortcuts to avoid opening unrelated programs;
+        // the application input sink itself does not depend on this probe.
+        let combinations: &[&[u16]] = &[
+            &[0xa0, 0x57], // left Shift + W
+            &[0x57, 0x41], // W + A
+            &[0xa1, 0x57], // right Shift + W
+            &[0xa2, 0x57], // left Ctrl + W
+            &[0xa3, 0x57], // right Ctrl + W
+            &[0xa4, 0x57], // left Alt + W
+            &[0xa5, 0x57], // right Alt + W (AltGr on some layouts)
+            &[0xa0, 0xa2, 0x57, 0x41],
+            &[0xa0, 0xa4, 0x57],
+            &[0xa2, 0xa4, 0x57],
+            &[0xa0, 0xa2, 0xa4, 0x57],
+            &[0x5b], // Win combinations omit W to avoid the OS Win+W shortcut.
+            &[0x5c],
+            &[0x5b, 0xa0],
+            &[0x5b, 0xa2],
+            &[0x5b, 0xa4],
+            &[0x5b, 0xa0, 0xa2],
+            &[0x5b, 0xa0, 0xa4],
+            &[0x5b, 0xa2, 0xa4],
+            &[0x5b, 0xa0, 0xa2, 0xa4],
+        ];
+        for combination in combinations {
+            let modifiers = combination.iter().fold(0, |mask, key| {
+                mask | match key {
+                    0xa4 | 0xa5 => 1,
+                    0xa2 | 0xa3 => 2,
+                    0xa0 | 0xa1 => 4,
+                    0x5b | 0x5c => 8,
+                    _ => 0,
+                }
+            });
+            if available & (1 << modifiers) == 0 {
+                continue;
+            }
+            if modifiers & 8 == 0 {
+                assert_eq!(
+                    unsafe { GetForegroundWindow() },
+                    fixture,
+                    "Keyboard fixture lost focus before sending {combination:x?}"
+                );
+            }
+            let _held = HeldKeys([*combination, &[0x71]].concat());
+            keys(combination, false);
+            for expected in [0.4, 0.8] {
+                keys(&[0x71], false);
+                keys(&[0x71], true);
+                let changed = (0..30).any(|_| {
+                    if unchanged(unsafe { volume.GetMasterVolume().unwrap() }, expected)
+                        && unsafe { IsWindowVisible(overlay) }.as_bool() == (expected == 0.4)
+                    {
+                        true
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        false
+                    }
+                });
+                assert!(
+                    changed,
+                    "F2 with held keys {combination:x?} failed; expected={expected}, actual={}",
+                    unsafe { volume.GetMasterVolume().unwrap() }
+                );
+                assert_eq!(
+                    unsafe { IsWindowVisible(overlay) }.as_bool(),
+                    expected == 0.4
+                );
+                assert!(!unsafe { IsWindowVisible(window) }.as_bool());
+                let foreground = unsafe { GetForegroundWindow() };
+                assert!(
+                    foreground != window && foreground != overlay,
+                    "Earplugs took focus for held keys {combination:x?}"
+                );
+                // A Win-key release can open the Windows Start menu. The input
+                // sink intentionally leaves OS shortcuts and key delivery alone.
+                if modifiers & 8 == 0 {
+                    assert_eq!(
+                        foreground, fixture,
+                        "Focus changed for held keys {combination:x?}"
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        // Repeated key-down events and modifier changes during a held F2 must
+        // not turn one press into multiple volume changes.
+        let _held = HeldKeys(vec![0x71, 0xa0, 0xa2, 0xa4, 0x5b]);
+        keys(&[0x71], false);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.4));
+        for modifier in [0xa0, 0xa2, 0xa4, 0x5b] {
+            let mask = match modifier {
+                0xa0 => 4,
+                0xa2 => 2,
+                0xa4 => 1,
+                _ => 8,
+            };
+            if available & (1 << mask) == 0 {
+                continue;
+            }
+            keys(&[modifier], false);
+            for _ in 0..5 {
+                keys(&[0x71], false);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert!(
+                unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.4),
+                "Held F2 repeated while adding modifier {modifier:x}"
+            );
+            keys(&[modifier], true);
+            keys(&[0x71], false);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert!(
+                unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.4),
+                "Held F2 repeated while releasing modifier {modifier:x}"
+            );
+        }
+        keys(&[0x71], true);
+        keys(&[0x71], false);
+        keys(&[0x71], true);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.8),
+            "A fresh F2 press did not restore after holding"
+        );
+        println!("Held movement keys, available modifier combinations (mask {available:04x}), left/right modifiers and F2 no-repeat passed.");
     }
 }

@@ -76,9 +76,51 @@ pub fn unchanged(current: f32, applied: f32) -> bool {
     (current - applied).abs() < 0.0001
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct F2Press {
+    down: bool,
+}
+
+impl F2Press {
+    pub fn event(&mut self, key: u16, down: bool) -> bool {
+        if key != 0x71 {
+            return false;
+        }
+        let first_press = down && !self.down;
+        self.down = down;
+        first_press
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn held_f2_ignores_repeat_and_modifier_changes_until_released() {
+        let mut press = F2Press::default();
+        let events = [
+            (0x57, true),
+            (0xa0, true),
+            (0x71, true),
+            (0x71, true),
+            (0xa2, true),
+            (0x71, true),
+            (0xa0, false),
+            (0x71, true),
+            (0xa2, false),
+            (0x71, true),
+            (0x71, false),
+            (0x71, true),
+            (0x71, false),
+            (0x57, false),
+        ];
+        let presses: Vec<usize> = events
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, (key, down))| press.event(key, down).then_some(index))
+            .collect();
+        assert_eq!(presses, [2, 11], "Only fresh F2 presses may toggle");
+    }
     #[test]
     fn defaults_and_persistence() {
         let settings = Settings::default();

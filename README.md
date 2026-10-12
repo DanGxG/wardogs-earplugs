@@ -14,7 +14,9 @@ A tiny native Windows tray app written in Rust. **F2 sets only WarDogs' Windows 
 
 `wardogs-earplugs.exe --background` starts directly in the tray. For optional startup with Windows, create a shortcut to the EXE in `shell:startup`, with `--background` in its Target. The app never enables startup itself.
 
-If another app owns F2, Earplugs reports the conflict. Close that app and restart Earplugs, or use the Toggle button. F2 is registered globally, so remove any in-game F2 binding you need. Exclusive fullscreen/input modes may prevent Windows hotkeys from being delivered; try borderless mode. There is deliberately no low-level keyboard hook fallback.
+F2 is observed through a Windows Raw Input background listener (`RIDEV_INPUTSINK`), independently of held movement keys or Ctrl, Shift, Alt and Windows modifiers. A press latch allows one toggle until F2 is released, including when modifiers change while F2 remains held. It uses no keyboard hooks or polling.
+
+F2 and modifier+F2 combinations are still delivered normally to the game and other apps. Remove conflicting bindings if you want only the earplugs action; other Windows shortcuts continue to work. The full live keyboard matrix and game-specific input behavior remain unverified; see the testing limits below and [VALIDATION.md](VALIDATION.md).
 
 The badge is a small, independent Windows window at the top-left of the primary screen. It stays above ordinary desktop and borderless/windowed game windows, lets clicks pass through, and does not take keyboard focus. It has no owner or attachment to the game window. Exclusive fullscreen may cover it. It appears only while earplugs are on and uses no timer or polling loop.
 
@@ -22,6 +24,7 @@ The badge is a small, independent Windows window at the top-left of the primary 
 
 - One thread, native Win32 controls, native tray icon and a blocking Windows message loop.
 - No polling, timers, worker threads, embedded browser, Python interpreter, telemetry, updates or network traffic.
+- The keyboard listener wakes on Windows keyboard events, reads a fixed stack buffer and ignores non-F2 keys. It records no keyboard events or typed text.
 - Audio/process enumeration happens when turning earplugs on. Applying a new target and restoring use the saved Windows audio-session interfaces.
 - Ordinary unchanged F2 presses perform no settings-file writes.
 - One running instance per Windows login session. Release builds optimize for size and link the MSVC runtime statically.
@@ -30,9 +33,9 @@ Memory and CPU depend on Windows, audio drivers and tray/UI state. See [VALIDATI
 
 ## Windows integration and reliability
 
-Earplugs uses Windows `RegisterHotKey`, a process-list snapshot containing filenames/PIDs, Core Audio mixer sessions and an independent native desktop badge. It does not open the game's process, read/write its memory, inject code, load a game plugin, hook the game window, intercept graphics or install a driver. The process snapshot is used solely to associate the named game's PIDs with its Windows audio sessions. It checks all active output devices, including games routed to a different output.
+Earplugs uses Windows Raw Input with `RegisterRawInputDevices` and `RIDEV_INPUTSINK`, a process-list snapshot containing filenames/PIDs, Core Audio mixer sessions and an independent native desktop badge. It does not open the game's process, read/write its memory, inject code, load a game plugin, hook input or the game window, intercept graphics or install a driver. The process snapshot is used solely to associate the named game's PIDs with its Windows audio sessions. It checks all active output devices, including games routed to a different output.
 
-Anti-cheat classification belongs to the game's vendor; this implementation cannot promise approval or that a future policy will accept a global hotkey utility.
+Anti-cheat classification belongs to the game's vendor; this implementation cannot promise approval or that a future policy will accept a background keyboard utility.
 
 Previous mixer volume is kept in memory. Applying a new target while on keeps that original restoration level. Manual mixer changes made after the most recent Apply are preserved on restoration. A game restart or output-device change may create new sessions: press F2 to clear/restore the old sessions, then F2 again to set the new ones. Normal Exit and Windows shutdown attempt restoration. Forced termination, a crash or power loss cannot guarantee restoration; use Windows Volume Mixer if needed. The app does not change mute state.
 
@@ -42,7 +45,7 @@ To uninstall, Exit, delete the EXE and remove any startup shortcut you created. 
 
 ## Code signing policy
 
-**Trusted code signing is pending service enrollment/identity validation.** Version 0.1.0 is publicly available as an explicitly unsigned EXE, and v0.1.1 is prepared for explicitly unsigned public distribution at the maintainer's request. The automated workflow keeps unsigned builds in drafts unless the maintainer chooses to publish them. Do not treat a checksum or a self-signed certificate as a trusted Authenticode signature.
+**Trusted code signing is pending service enrollment/identity validation.** Version 0.1.0 is publicly available as an explicitly unsigned EXE, and v0.1.2 is prepared for explicitly unsigned public distribution at the maintainer's request. The automated workflow keeps unsigned builds in drafts unless the maintainer chooses to publish them. Do not treat a checksum or a self-signed certificate as a trusted Authenticode signature.
 
 The project includes a GitHub-hosted build and a SignPath signing stage. It publishes a signed release only after the returned EXE passes Windows Authenticode validation. See [SIGNING.md](SIGNING.md) for setup and certificate alternatives. The maintainer is [Daniel Grao / DanGxG](https://github.com/DanGxG). No signing provider is claimed to endorse or sign this project before acceptance.
 
@@ -70,7 +73,19 @@ cargo build --locked --example wardogs-test-tone
 cargo test --locked real_windows_mixer_roundtrip -- --ignored --nocapture
 ```
 
-To test the real F2 hotkey and restore-on-exit against a particular compiled EXE, close Earplugs first and set `$env:EARPLUGS_TEST_EXE` to that EXE's absolute path before running the mixer test. The test sends actual F2 input through Windows while the app is hidden. To verify controls, persistence, tray hiding, duplicate launches and idle resource use:
+To test real F2 delivery and restore-on-exit against a particular compiled EXE, close Earplugs first and set `$env:EARPLUGS_TEST_EXE` to that EXE's absolute path before running the mixer test. The normal test injects keyboard input through Windows and needs a quiet desktop with other games closed so its harmless keyboard fixture keeps focus.
+
+To leave a game or other app open, disable keyboard injection while checking the release's mixer changes, Apply controls, overlay and restore-on-exit:
+
+```powershell
+$env:EARPLUGS_TEST_NO_INPUT = '1'
+cargo test --locked real_windows_mixer_roundtrip -- --ignored --nocapture
+Remove-Item Env:EARPLUGS_TEST_NO_INPUT
+```
+
+This mode uses direct control messages and does not verify physical F2 delivery, held-key combinations or input deferral inside a tray menu. Six ordinary tests include a realistic movement-key, modifier-change and repeated-F2 sequence. The old Shift+W failure was reproduced in v0.1.1; an initial Raw Input live Shift+W check reached the expected mixer levels, but the full keyboard run failed because WarDogs reclaimed focus from the test fixture. The complete live keyboard matrix is still unverified.
+
+To verify controls, persistence, tray hiding, duplicate launches and idle resource use:
 
 ```powershell
 ./scripts/smoke.ps1 -Executable ./target/release/wardogs-earplugs.exe

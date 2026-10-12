@@ -59,8 +59,8 @@ try {
     [EarplugsSmoke]::SetText($name, 'no-such-game-fixture.exe')
     [void][EarplugsSmoke]::SendMessage($window, 0x111, [IntPtr]101, [IntPtr]::Zero)
     Assert-True ((Get-Content -LiteralPath $config -Raw).Contains("25`nno-such-game-fixture.exe")) 'Settings did not persist.'
-    [void][EarplugsSmoke]::SendMessage($window, 0x312, [IntPtr]1, [IntPtr]::Zero)
-    Assert-True ([EarplugsSmoke]::ChildTexts($window).Contains('No matching game audio.')) 'Hotkey dispatch did not report the missing game.'
+    [void][EarplugsSmoke]::SendMessage($window, 0x111, [IntPtr]102, [IntPtr]::Zero)
+    Assert-True ([EarplugsSmoke]::ChildTexts($window).Contains('No matching game audio.')) 'Toggle did not report the missing game.'
     Assert-True (-not [EarplugsSmoke]::IsWindowVisible($overlay)) 'Missing game incorrectly showed the ON overlay.'
     [void][EarplugsSmoke]::SendMessage($window, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)
     Assert-True (-not [EarplugsSmoke]::IsWindowVisible($window)) 'Close did not hide to the tray.'
@@ -84,7 +84,7 @@ try {
         IdleCpuMilliseconds = $cpuAfter - $cpuBefore
         Threads = $process.Threads.Count
         Signature = (Get-AuthenticodeSignature -LiteralPath $Executable).Status.ToString()
-        Result = 'PASS: defaults, validation, atomic persistence, hotkey dispatch, close-to-tray, single instance, background idle, exit'
+        Result = 'PASS: defaults, validation, atomic persistence, toggle dispatch, close-to-tray, single instance, background idle, exit'
     } | ConvertTo-Json | Tee-Object -FilePath 'test-output/smoke-results.json'
     [void][EarplugsSmoke]::PostMessage($window, 0x111, [IntPtr]104, [IntPtr]::Zero)
     Assert-True ($process.WaitForExit(5000)) 'Exit did not stop the app.'

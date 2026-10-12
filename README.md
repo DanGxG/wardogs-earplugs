@@ -5,6 +5,7 @@ A tiny native Windows tray app written in Rust. **F2 sets only WarDogs' Windows 
 ## Use
 
 1. Download the Windows x64 release EXE, or unzip the portable package. Requires Windows 10/11 x64. No Python, installer or administrator access is needed.
+   When updating, **Exit the old version first**; launching a new copy while the old one is running reopens the old instance.
 2. Run `wardogs-earplugs.exe` and start WarDogs so it creates a Windows audio session.
 3. Enter a whole **Game mixer volume (%)** from **0 to 100**. Default is **40**. This is an exact target mixer percentage, not a relative reduction or a ceiling: choosing 60 sets matching sessions to 60%, even if they were quieter.
 4. Leave **Game executable contains** at `wardogs`, or enter the actual name shown in Task Manager's **Details** tab. Matching ignores letter case. A complete name ending in `.exe` matches exactly; otherwise it matches that distinctive part of the filename. Click **Apply**. While earplugs are on, Apply updates the current sessions immediately, including changes from 40% to 60% or 80%, while keeping their original levels for restoration.

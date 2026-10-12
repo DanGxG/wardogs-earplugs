@@ -417,6 +417,11 @@ mod tests {
             };
             for expected in [0.4, 0.8, 0.4] {
                 let foreground = unsafe { GetForegroundWindow() };
+                let key_state = [0x10, 0x11, 0x12, 0x5b, 0x5c, 0x71].map(|key| {
+                    (key, unsafe {
+                        windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(key)
+                    })
+                });
                 assert_eq!(
                     unsafe { SendInput(&[key_down, key_up], size_of::<INPUT>() as i32) },
                     2,
@@ -432,7 +437,7 @@ mod tests {
                 });
                 assert!(
                     changed,
-                    "Real F2 did not set expected mixer volume {expected}; actual={}, overlay_on={}, foreground={:?}",
+                    "Real F2 did not set expected mixer volume {expected}; actual={}, overlay_on={}, foreground={:?}, keys_before={key_state:?}",
                     unsafe { volume.GetMasterVolume().unwrap() },
                     unsafe { IsWindowVisible(overlay) }.as_bool(),
                     unsafe { GetForegroundWindow() },

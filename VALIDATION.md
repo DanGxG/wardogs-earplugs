@@ -27,9 +27,9 @@ The app creates one UI thread; Windows/COM may create internal threads. Working 
 
 The final tagged build repeats CI validation. The signing stage requires a `Valid` trusted Authenticode signature before publishing through that path; the maintainer can explicitly publish unsigned assets. SHA-256 checksums are generated from the actual release assets.
 
-## v0.1.1 local checks
+## v0.1.1 checks
 
-Passed against the local GNU release build; the official MSVC release build, final Defender scan and release asset verification remain pending:
+Passed against the local GNU build and the GitHub-hosted MSVC build of production code at commit `48f6520`:
 
 - Formatting, Clippy with warnings denied, five unit/filesystem tests and release compilation.
 - Real mixer reproduction: turn on at 40%, Apply 60%, Apply 80%, then restore the original volume; an initially quieter session reaches the chosen exact target; 0% and 100% targets; manual mixer changes and missing-game reporting.
@@ -38,7 +38,22 @@ Passed against the local GNU release build; the official MSVC release build, fin
 - UI validation and persistence, Apply while active, tray hiding, duplicate-instance handling and normal exit.
 - Overlay visibility only while on, primary-screen placement at (12, 12), no focus activation, transparent hit testing, topmost state, matching the Earplugs process ID, no owner window, and destruction on Exit.
 - Visual inspection of the actual onscreen badge: mint text on a small translucent black background, no clipping.
+- Mouse input reached a separate test process's window beneath the visible badge without changing focus.
+- GitHub-hosted Windows formatting/lint/unit/build checks passed. The MSVC EXE reports version 0.1.1 and contains no imported process-memory APIs, low-level keyboard hook, input injection or polling timer.
+- Microsoft Defender custom scan of the MSVC EXE completed with no matching detection reported on this computer; this is not a universal antivirus result.
 - Local GNU sample: OFF working set 10,055,680 bytes, private memory 2,002,944 bytes; 0 ms CPU recorded over 15 idle seconds. ON with badge visible: working set 11,808,768 bytes, private memory 2,383,872 bytes; 0 ms CPU recorded over 5 idle seconds. These are measurements on this computer, not universal limits.
+
+Representative MSVC v0.1.1 measurements on this computer:
+
+| Measurement | Result |
+| --- | ---: |
+| EXE size | 274,432 bytes (268 KiB) |
+| OFF working set / private memory | 11,636,736 / 2,121,728 bytes |
+| ON working set / private memory | 12,161,024 / 2,412,544 bytes |
+| Idle CPU OFF, 15 seconds | 0 ms recorded |
+| Idle CPU ON, 5 seconds | 0 ms recorded |
+
+Repeated live synthetic-key testing had an intermittent delivery failure (`Real F2 did not set expected mixer volume 0.4; actual=0.8, overlay_on=false`). Other native F2 runs and deterministic dispatched-hotkey tests passed. Synthetic input shares the desktop's keyboard state; these results do not verify every desktop/input context or the actual game's fullscreen behavior.
 
 ## Not verified / external prerequisites
 

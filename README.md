@@ -67,4 +67,12 @@ cargo build --locked --example wardogs-test-tone
 cargo test --locked real_windows_mixer_roundtrip -- --ignored --nocapture
 ```
 
+To test the real F2 hotkey and restore-on-exit against a particular compiled EXE, close Earplugs first and set `$env:EARPLUGS_TEST_EXE` to that EXE's absolute path before running the mixer test. The test sends actual F2 input through Windows while the app is hidden. To verify controls, persistence, tray hiding, duplicate launches and idle resource use:
+
+```powershell
+./scripts/smoke.ps1 -Executable ./target/release/wardogs-earplugs.exe
+```
+
+These tests use isolated settings and a silent fixture; they do not launch or inspect the game.
+
 GitHub runners do not normally provide an audio output, so the real-device test is opt-in. It targets only `wardogs-test-tone.exe` and is never shipped. GNU builds can be used for development; the release workflow uses MSVC and embeds the app manifest and version resource.

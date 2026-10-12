@@ -5,8 +5,9 @@ use windows::{
     Win32::{
         Foundation::CloseHandle,
         Media::Audio::{
-            eRender, AudioSessionStateExpired, IAudioSessionControl2, IAudioSessionManager2,
-            IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+            eRender, AudioSessionStateExpired, IAudioSessionControl, IAudioSessionControl2,
+            IAudioSessionManager2, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
+            AUDCLNT_E_DEVICE_INVALIDATED, DEVICE_STATE_ACTIVE,
         },
         System::{
             Com::{CoCreateInstance, CLSCTX_ALL},
@@ -20,6 +21,7 @@ use windows::{
 
 struct ChangedSession {
     volume: ISimpleAudioVolume,
+    control: IAudioSessionControl,
     previous: f32,
     applied: f32,
 }
@@ -49,6 +51,7 @@ impl Audio {
             pending.push(ChangedSession {
                 applied: settings.lowered_volume(previous),
                 previous,
+                control: volume.cast().map_err(|e| e.to_string())?,
                 volume,
             });
         }
@@ -77,21 +80,27 @@ impl Audio {
         let mut failed = Vec::new();
         let mut manual = 0;
         for session in self.changed.drain(..) {
-            // Closed games/devices may disappear; keep failed sessions for a retry.
+            // Only expired sessions/removed devices can be safely dropped without restoration.
+            match unsafe { session.control.GetState() } {
+                Ok(state) if state == AudioSessionStateExpired => continue,
+                Err(error) if error.code() == AUDCLNT_E_DEVICE_INVALIDATED => continue,
+                _ => (),
+            }
             match unsafe { session.volume.GetMasterVolume() } {
                 Ok(current) if unchanged(current, session.applied) => {
-                    if unsafe {
+                    if let Err(error) = unsafe {
                         session
                             .volume
                             .SetMasterVolume(session.previous, std::ptr::null())
-                    }
-                    .is_err()
-                    {
-                        failed.push(session);
+                    } {
+                        if error.code() != AUDCLNT_E_DEVICE_INVALIDATED {
+                            failed.push(session);
+                        }
                     }
                 }
                 Ok(_) => manual += 1,
-                Err(_) => { /* The audio session is no longer available. */ }
+                Err(error) if error.code() == AUDCLNT_E_DEVICE_INVALIDATED => (),
+                Err(_) => failed.push(session),
             }
         }
         self.changed = failed;
@@ -236,6 +245,9 @@ mod tests {
             let missing = Settings::parse("40", "no-such-game-fixture.exe").unwrap();
             assert!(audio.toggle(&missing).is_err());
             assert!(!audio.is_lowered());
+            if let Some(executable) = std::env::var_os("EARPLUGS_TEST_EXE") {
+                verify_release_hotkey(&executable, &settings, volume);
+            }
         });
         let _ = child.kill();
         let _ = child.wait();
@@ -245,6 +257,122 @@ mod tests {
         unsafe {
             CoUninitialize();
         }
+        result.unwrap();
+    }
+
+    fn verify_release_hotkey(
+        executable: &std::ffi::OsStr,
+        settings: &Settings,
+        volume: &ISimpleAudioVolume,
+    ) {
+        use windows::{
+            core::w,
+            Win32::{
+                Foundation::{LPARAM, WPARAM},
+                UI::{
+                    Input::KeyboardAndMouse::{
+                        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+                        VK_F2,
+                    },
+                    WindowsAndMessaging::{FindWindowW, IsWindowVisible, PostMessageW, WM_COMMAND},
+                },
+            },
+        };
+        assert!(
+            unsafe { FindWindowW(w!("WarDogsEarplugsWindow"), None) }.is_err(),
+            "Close the running Earplugs app before the release hotkey test."
+        );
+        let profile = std::env::temp_dir().join(format!("earplugs-ui-test-{}", std::process::id()));
+        let configuration = profile.join("WarDogsEarplugs").join("settings.txt");
+        crate::settings::save(&configuration, settings).unwrap();
+        let mut app = std::process::Command::new(executable)
+            .arg("--background")
+            .env("LOCALAPPDATA", &profile)
+            .spawn()
+            .unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let window = (0..50)
+                .find_map(|_| {
+                    let found = unsafe { FindWindowW(w!("WarDogsEarplugsWindow"), None) }.ok();
+                    if found.is_none() {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    found
+                })
+                .expect("Release EXE did not create a window");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(
+                !unsafe { IsWindowVisible(window) }.as_bool(),
+                "Release must run in the background with F2 registered"
+            );
+            unsafe {
+                volume.SetMasterVolume(0.8, std::ptr::null()).unwrap();
+            }
+            let key_down = INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VK_F2,
+                        ..Default::default()
+                    },
+                },
+            };
+            let key_up = INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VK_F2,
+                        dwFlags: KEYEVENTF_KEYUP,
+                        ..Default::default()
+                    },
+                },
+            };
+            for expected in [0.4, 0.8, 0.4] {
+                assert_eq!(
+                    unsafe { SendInput(&[key_down, key_up], size_of::<INPUT>() as i32) },
+                    2,
+                    "Windows did not accept the test F2 input"
+                );
+                let changed = (0..30).any(|_| {
+                    if unchanged(unsafe { volume.GetMasterVolume().unwrap() }, expected) {
+                        true
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        false
+                    }
+                });
+                assert!(
+                    changed,
+                    "Real F2 did not set expected mixer volume {expected}"
+                );
+                assert!(
+                    !unsafe { IsWindowVisible(window) }.as_bool(),
+                    "Hotkey unexpectedly opened the UI"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            unsafe {
+                PostMessageW(Some(window), WM_COMMAND, WPARAM(104), LPARAM(0)).unwrap();
+            }
+            let exited = (0..30).any(|_| {
+                if app.try_wait().unwrap().is_some() {
+                    true
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    false
+                }
+            });
+            assert!(exited, "Restore-and-exit did not close release EXE");
+            assert!(
+                unchanged(unsafe { volume.GetMasterVolume().unwrap() }, 0.8),
+                "Exit did not restore previous mixer volume"
+            );
+        }));
+        let _ = app.kill();
+        let _ = app.wait();
+        let _ = std::fs::remove_file(&configuration);
+        let _ = std::fs::remove_dir(configuration.parent().unwrap());
+        let _ = std::fs::remove_dir(profile);
         result.unwrap();
     }
 }
